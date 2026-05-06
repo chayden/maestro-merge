@@ -1,0 +1,15 @@
+.DS_Store
+
+# Local agent/collaboration scratch files.
+.context/
+
+# Captured browser traffic can include auth tokens, cookies, meet data, and swimmer info.
+*.har
+examples/
+example-requests/
+
+# Local analysis notes; keep the checked-in package focused on extension code.
+SPEC.md
+
+# Build output.
+dist/
