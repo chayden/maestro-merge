@@ -39,6 +39,19 @@ The package script uses an explicit allowlist of extension files so local HAR ca
 - Provides an organizer view for reseating swimmers within an event.
 - Supports drag-and-drop lane moves, slowest-to-fastest organization, and boys/girls grouping.
 
+## Recommended Use
+
+1. **Create the meet** in SwimTopia using a normal event template with age-group- and gender-specific events.
+2. **Sign up swimmers** — swimmers or coaches enter the events they will swim.
+3. **Lock changes** for both teams and share the meet.
+4. **Apply an alternative event template** — the home team updates the meet to add mixed-gender and cross-age-group events.
+5. **Enter Meet Maestro** and activate the extension.
+6. **Review merge opportunities** — the extension shows a list of events that can be consolidated to save heats.
+7. **Apply merges** — click "Merge" on any you want to apply. Use "Hide" to dismiss ones you don't.
+8. **Organize merged events** — for each event after merging, choose how to populate heats: primarily by times, primarily by gender, or manually.
+9. **Review the heat sheet** to confirm everything looks correct.
+10. **Undo if needed** — return to SwimTopia and "Rebuild" the meet to restore all events to their default state.
+
 ## Privacy
 
 The extension runs locally in the browser and does not send data to any third-party service. It reads Meet Maestro API responses in the active Meet Maestro session and uses the current browser session to make SwimTopia API requests.
