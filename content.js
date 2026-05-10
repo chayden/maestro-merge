@@ -1,8 +1,8 @@
 // Content script for Meet Maestro Merge Helper
 // Runs on maestro.swimtopia.com
 //
-// Focus: detect cross-event merge opportunities to reduce total heats.
-// Swimmers "swim up" into the next age group's event when combining saves heats.
+// Focus: detect target-based multi-source merge opportunities to reduce total heats.
+// Letter-suffixed events are treated as merge destinations, never sources.
 
 (function () {
   if (window.__mmMergeHelperLoaded) return;
@@ -22,10 +22,13 @@
   let allTeams = [];
   let laneCount = null; // Loaded from Meet Maestro metadata.
   let appliedMerges = new Set(); // track which opportunities have been applied
+  let hiddenOpportunities = new Set();
+  let needsOrganizationEventIds = new Set();
   let currentView = 'dashboard';
   let organizerEventId = null;
   let operationDepth = 0;
   let organizerLabelMode = 'initials';
+  const meetMaestroRefreshReadDelayMs = 250;
 
   // ---- Auth & meet ID detection ----
 
@@ -51,6 +54,8 @@
     if (!changed) return;
     api = null;
     appliedMerges = new Set();
+    hiddenOpportunities = new Set();
+    needsOrganizationEventIds = new Set();
     if (panelVisible && mergePanel) {
       withBusy('Loading meet data...', () => loadData()).catch(() => {});
     }
@@ -188,6 +193,20 @@
   }
 
   // ---- Helpers ----
+
+  async function nudgeMeetMaestroView(a, eventIds, label = 'Refreshing Meet Maestro view...') {
+    const ids = Array.from(new Set((eventIds || []).filter(Boolean)));
+    if (ids.length === 0 || typeof a?.refreshEvents !== 'function') return;
+
+    setBusyMessage(label);
+    try {
+      await a.refreshEvents(ids);
+      await sleep(meetMaestroRefreshReadDelayMs);
+      await a.refreshEvents(ids);
+    } catch (err) {
+      console.warn('[Merge Helper] fresh event read failed:', err);
+    }
+  }
 
   function isOperationInFlight() {
     return operationDepth > 0;
@@ -563,7 +582,7 @@
   }
 
   function eventGender(evt) {
-    return evt.attributes?.athleteGender || eventNodeFor(evt.id)?.attributes?.athleteGender || '';
+    return (evt.attributes?.athleteGender || eventNodeFor(evt.id)?.attributes?.athleteGender || '').toUpperCase();
   }
 
   function eventAgeMin(evt) {
@@ -572,6 +591,41 @@
 
   function eventAgeMax(evt) {
     return evt.attributes?.athleteMaxAge ?? eventNodeFor(evt.id)?.attributes?.athleteMaxAge ?? null;
+  }
+
+  function eventNumber(evt) {
+    const value = evt.attributes?.eventNumber ?? eventNodeFor(evt.id)?.attributes?.eventNumber;
+    return value === null || value === undefined ? '' : String(value).trim();
+  }
+
+  function isMergeTarget(evt) {
+    return /[A-Za-z]$/.test(eventNumber(evt));
+  }
+
+  function eventStrokeCode(evt) {
+    return evt.attributes?.strokeCode ?? eventNodeFor(evt.id)?.attributes?.strokeCode ?? null;
+  }
+
+  function eventDistance(evt) {
+    return evt.attributes?.distance ?? eventNodeFor(evt.id)?.attributes?.distance ?? null;
+  }
+
+  function hasRaceMetadata(evt) {
+    return eventStrokeCode(evt) !== null &&
+      eventStrokeCode(evt) !== undefined &&
+      eventDistance(evt) !== null &&
+      eventDistance(evt) !== undefined;
+  }
+
+  function hasAgeMetadata(evt) {
+    return eventAgeMin(evt) !== null &&
+      eventAgeMin(evt) !== undefined &&
+      eventAgeMax(evt) !== null &&
+      eventAgeMax(evt) !== undefined;
+  }
+
+  function ageKey(evt) {
+    return `${eventAgeMin(evt)}-${eventAgeMax(evt)}`;
   }
 
   function heatSummary(evt) {
@@ -603,153 +657,341 @@
     return Math.ceil(missingLanes / requireLaneCount());
   }
 
-  // Group events by stroke + distance (same "race", different age/gender)
-  function groupEventsByRace() {
-    const groups = {};
-    for (const evt of allEvents) {
-      const a = evt.attributes || {};
-      const stroke = a.strokeCode ?? eventNodeFor(evt.id)?.attributes?.strokeCode;
-      const distance = a.distance ?? eventNodeFor(evt.id)?.attributes?.distance;
-      if (stroke === null || stroke === undefined || distance === null || distance === undefined) continue;
-      const key = `${distance}-${stroke}`;
-      if (!key) continue;
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(evt);
-    }
-    // Filter to groups with >1 event (potential merge targets)
-    return Object.entries(groups)
-      .filter(([, evts]) => evts.length > 1)
-      .sort(([a], [b]) => a.localeCompare(b));
-  }
-
   // ---- Optimization analysis ----
 
-  // For a set of events, enumerate merge opportunities.
-  // A "merge" means moving all swimmers from a younger event into the next older event.
-  // We prefer same-gender first, then cross-gender if it saves more heats.
+  function compareAgeThenEventOrder(a, b) {
+    const ageDiff = Number(eventAgeMin(a)) - Number(eventAgeMin(b));
+    if (ageDiff !== 0) return ageDiff;
+    const maxAgeDiff = Number(eventAgeMax(a)) - Number(eventAgeMax(b));
+    if (maxAgeDiff !== 0) return maxAgeDiff;
+    const genderDiff = eventGender(a).localeCompare(eventGender(b));
+    if (genderDiff !== 0) return genderDiff;
+    return compareEventOrder(a, b);
+  }
+
+  function isSourceCompatibleWithTarget(source, target) {
+    if (source.id === target.id || isMergeTarget(source)) return false;
+    if (!hasRaceMetadata(source) || !hasRaceMetadata(target) || !hasAgeMetadata(source) || !hasAgeMetadata(target)) return false;
+    if (String(eventStrokeCode(source)) !== String(eventStrokeCode(target))) return false;
+    if (String(eventDistance(source)) !== String(eventDistance(target))) return false;
+    if (Number(eventAgeMin(target)) > Number(eventAgeMin(source))) return false;
+    if (Number(eventAgeMax(target)) < Number(eventAgeMax(source))) return false;
+
+    const targetGender = eventGender(target);
+    const sourceGender = eventGender(source);
+    return targetGender === 'X' || targetGender === sourceGender;
+  }
+
+  function sourceEntryCount(evt) {
+    return recordsFor(evt.id).length;
+  }
+
+  function sourceHeatCount(evt) {
+    if (sourceEntryCount(evt) === 0) return 0;
+    return currentHeatCount(evt);
+  }
+
+  function isAgeRunContiguous(events) {
+    const sorted = events.slice().sort(compareAgeThenEventOrder);
+    for (let i = 1; i < sorted.length; i++) {
+      const previousMax = Number(eventAgeMax(sorted[i - 1]));
+      const nextMin = Number(eventAgeMin(sorted[i]));
+      if (!Number.isFinite(previousMax) || !Number.isFinite(nextMin)) return false;
+      if (nextMin > previousMax + 1) return false;
+    }
+    return true;
+  }
+
+  function contiguousRunsForGender(events) {
+    const sorted = events.slice().sort(compareAgeThenEventOrder);
+    const runs = [];
+    for (let start = 0; start < sorted.length; start++) {
+      for (let end = start; end < sorted.length; end++) {
+        const runEvents = sorted.slice(start, end + 1);
+        if (!isAgeRunContiguous(runEvents)) continue;
+        const nonEmptyEvents = runEvents.filter(evt => sourceEntryCount(evt) > 0);
+        if (nonEmptyEvents.length === 0) continue;
+        runs.push({ allEvents: runEvents, nonEmptyEvents });
+      }
+    }
+    return runs;
+  }
+
+  function uniqueEvents(events) {
+    const seen = new Set();
+    const unique = [];
+    events.forEach(evt => {
+      if (!evt?.id || seen.has(evt.id)) return;
+      seen.add(evt.id);
+      unique.push(evt);
+    });
+    return unique;
+  }
+
+  function sourceEventsKey(events) {
+    return events.map(evt => evt.id).sort().join('+');
+  }
+
+  function sourceEventIdSet(opp) {
+    return new Set(opp.sourceEvents.map(evt => evt.id));
+  }
+
+  function sourceEventsAreSubset(subsetOpp, supersetOpp) {
+    const supersetIds = sourceEventIdSet(supersetOpp);
+    return subsetOpp.sourceEvents.every(evt => supersetIds.has(evt.id));
+  }
+
+  function hasBalancedBoysGirlsSelection(nonEmptyEvents, compatibleSources) {
+    const selectedIds = new Set(nonEmptyEvents.map(evt => evt.id));
+    const selectedGenders = new Set(nonEmptyEvents.map(eventGender));
+    if (!selectedGenders.has('M') || !selectedGenders.has('F')) return true;
+
+    const compatibleByGenderAndAge = new Map();
+    compatibleSources.forEach(evt => {
+      const gender = eventGender(evt);
+      if (!['M', 'F'].includes(gender)) return;
+      compatibleByGenderAndAge.set(`${gender}:${ageKey(evt)}`, evt);
+    });
+
+    const selectedAges = new Set(nonEmptyEvents
+      .filter(evt => ['M', 'F'].includes(eventGender(evt)))
+      .map(ageKey));
+
+    for (const key of selectedAges) {
+      for (const gender of ['M', 'F']) {
+        const counterpart = compatibleByGenderAndAge.get(`${gender}:${key}`);
+        if (counterpart && (selectedIds.has(counterpart.id) || sourceEntryCount(counterpart) === 0)) continue;
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  function makeOpportunity(targetEvent, sourceEvents, raceKey) {
+    const targetRecords = recordsFor(targetEvent.id);
+    const sourceRecords = sourceEvents
+      .slice()
+      .sort(compareAgeThenEventOrder)
+      .flatMap(evt => recordsFor(evt.id).slice().sort(compareFastestFirst));
+    const sourceCounts = sourceEvents.map(evt => sourceEntryCount(evt));
+    const sourceHeats = sourceEvents.map(evt => sourceHeatCount(evt));
+    if (sourceCounts.some(count => count <= 0) || sourceHeats.some(count => count === null)) return null;
+
+    const targetHeats = currentHeatCount(targetEvent) || 0;
+    const currentHeats = sourceHeats.reduce((sum, count) => sum + count, targetHeats);
+    const combinedHeats = heatsNeeded(sourceRecords.length + targetRecords.length);
+    const heatsSaved = currentHeats - combinedHeats;
+    if (heatsSaved <= 0) return null;
+
+    const sortedSources = sourceEvents.slice().sort(compareAgeThenEventOrder);
+    const opportunity = {
+      id: `target:${targetEvent.id}|sources:${sourceEventsKey(sortedSources)}`,
+      raceKey,
+      raceLabel: raceLabel(targetEvent),
+      sourceEvents: sortedSources,
+      sourceEvent: sortedSources.length === 1 ? sortedSources[0] : null,
+      targetEvent,
+      sourceLabel: sortedSources.map(eventLabel).join(' + '),
+      targetLabel: eventLabel(targetEvent),
+      sourceSwimmerCount: sourceRecords.length,
+      targetSwimmerCount: targetRecords.length,
+      currentHeats,
+      combinedHeats,
+      heatsSaved,
+      sourceRecords,
+      targetRecords,
+      allSourceEvents: sortedSources,
+      missingHeatCount: 0,
+      canApply: true,
+    };
+    opportunity.missingHeatCount = missingHeatCountForOpportunity(opportunity);
+    return opportunity;
+  }
+
+  function generateSourceSelections(targetEvent, compatibleSources) {
+    const byGender = new Map();
+    compatibleSources.forEach(evt => {
+      const gender = eventGender(evt) || 'U';
+      if (!byGender.has(gender)) byGender.set(gender, []);
+      byGender.get(gender).push(evt);
+    });
+
+    const selections = new Map();
+    const addSelection = events => {
+      const nonEmptyEvents = uniqueEvents(events).filter(evt => sourceEntryCount(evt) > 0).sort(compareAgeThenEventOrder);
+      if (nonEmptyEvents.length < 2) return;
+      if (!hasBalancedBoysGirlsSelection(nonEmptyEvents, compatibleSources)) return;
+      selections.set(sourceEventsKey(nonEmptyEvents), nonEmptyEvents);
+    };
+
+    const runsByGender = new Map();
+    for (const [gender, events] of byGender.entries()) {
+      const runs = contiguousRunsForGender(events);
+      runsByGender.set(gender, runs);
+      runs.forEach(run => addSelection(run.nonEmptyEvents));
+    }
+
+    const boysRuns = runsByGender.get('M') || [];
+    const girlsRuns = runsByGender.get('F') || [];
+    if (boysRuns.length && girlsRuns.length) {
+      boysRuns.forEach(boysRun => {
+        girlsRuns.forEach(girlsRun => {
+          addSelection([...boysRun.nonEmptyEvents, ...girlsRun.nonEmptyEvents]);
+        });
+      });
+    }
+
+    return Array.from(selections.values());
+  }
+
+  function filterStrictlyDiminishing(opportunities) {
+    return opportunities.filter(opp => {
+      const sourceIds = new Set(opp.sourceEvents.map(evt => evt.id));
+      return !opportunities.some(other => {
+        if (other.id === opp.id || other.targetEvent.id !== opp.targetEvent.id) return false;
+        if (other.sourceEvents.length >= opp.sourceEvents.length) return false;
+        const isSubset = other.sourceEvents.every(evt => sourceIds.has(evt.id));
+        return isSubset && other.heatsSaved >= opp.heatsSaved;
+      });
+    });
+  }
+
+  function targetGenderSpecificity(evt) {
+    return eventGender(evt) === 'X' ? 0 : 1;
+  }
+
+  function sourceAgeEnvelope(sourceEvents) {
+    return sourceEvents.reduce((envelope, evt) => {
+      const min = Number(eventAgeMin(evt));
+      const max = Number(eventAgeMax(evt));
+      if (!Number.isFinite(min) || !Number.isFinite(max)) return envelope;
+      return {
+        min: envelope.min === null ? min : Math.min(envelope.min, min),
+        max: envelope.max === null ? max : Math.max(envelope.max, max),
+      };
+    }, { min: null, max: null });
+  }
+
+  function sourceTargetGender(sourceEvents) {
+    const genders = new Set(sourceEvents.map(eventGender));
+    if (genders.has('M') && genders.has('F')) return 'X';
+    if (genders.size === 1) return [...genders][0];
+    return 'X';
+  }
+
+  function targetGenderLabel(gender) {
+    if (gender === 'X') return 'Mixed';
+    if (gender === 'M') return 'Boys';
+    if (gender === 'F') return 'Girls';
+    return gender || 'Unknown gender';
+  }
+
+  function targetAgeLabel(min, max) {
+    if (min === null || max === null) return 'matching age';
+    if (min <= 0) return `${max} & Under`;
+    if (min === max) return String(min);
+    return `${min}-${max}`;
+  }
+
+  function idealTargetDiagnostic(opp) {
+    const envelope = sourceAgeEnvelope(opp.sourceEvents);
+    if (envelope.min === null || envelope.max === null) return null;
+
+    const targetMin = Number(eventAgeMin(opp.targetEvent));
+    const targetMax = Number(eventAgeMax(opp.targetEvent));
+    if (targetMin <= envelope.min && targetMax === envelope.max) return null;
+
+    const expectedGender = sourceTargetGender(opp.sourceEvents);
+    const expectedLabel = `${targetGenderLabel(expectedGender)} ${targetAgeLabel(0, envelope.max)} ${raceLabel(opp.targetEvent)}`;
+    const narrowerMatches = allEvents.filter(evt =>
+      evt.id !== opp.targetEvent.id &&
+      String(eventStrokeCode(evt)) === String(eventStrokeCode(opp.targetEvent)) &&
+      String(eventDistance(evt)) === String(eventDistance(opp.targetEvent)) &&
+      eventGender(evt) === expectedGender &&
+      Number(eventAgeMin(evt)) <= envelope.min &&
+      Number(eventAgeMax(evt)) === envelope.max
+    );
+
+    if (narrowerMatches.length === 0) {
+      return `No loaded ${expectedLabel} target was found. Check that it exists in this session with matching stroke, distance, gender, and age metadata.`;
+    }
+
+    const nonTargets = narrowerMatches.filter(evt => !isMergeTarget(evt));
+    if (nonTargets.length > 0) {
+      return `${expectedLabel} exists, but its event number does not end in a letter, so it is treated as a regular source event.`;
+    }
+
+    const compatibleTargets = narrowerMatches.filter(evt =>
+      opp.sourceEvents.every(source => isSourceCompatibleWithTarget(source, evt))
+    );
+    if (compatibleTargets.length === 0) {
+      return `${expectedLabel} exists as a merge target, but its metadata does not contain all selected source events.`;
+    }
+
+    return `${expectedLabel} exists as a merge target but was not selected. Refresh meet data; if this remains, the dominance filter needs another look.`;
+  }
+
+  function isMoreSpecificTargetForSameSources(moreSpecific, broader) {
+    if (String(eventStrokeCode(moreSpecific.targetEvent)) !== String(eventStrokeCode(broader.targetEvent))) return false;
+    if (String(eventDistance(moreSpecific.targetEvent)) !== String(eventDistance(broader.targetEvent))) return false;
+
+    const moreSpecificMin = Number(eventAgeMin(moreSpecific.targetEvent));
+    const moreSpecificMax = Number(eventAgeMax(moreSpecific.targetEvent));
+    const broaderMin = Number(eventAgeMin(broader.targetEvent));
+    const broaderMax = Number(eventAgeMax(broader.targetEvent));
+    if (![moreSpecificMin, moreSpecificMax, broaderMin, broaderMax].every(Number.isFinite)) return false;
+
+    const ageContained = moreSpecificMin >= broaderMin && moreSpecificMax <= broaderMax;
+    if (!ageContained) return false;
+
+    const ageIsNarrower = moreSpecificMin > broaderMin || moreSpecificMax < broaderMax;
+    const genderIsMoreSpecific = targetGenderSpecificity(moreSpecific.targetEvent) > targetGenderSpecificity(broader.targetEvent);
+    return ageIsNarrower || genderIsMoreSpecific;
+  }
+
+  function filterBroaderNonImprovingTargets(opportunities) {
+    return opportunities.filter(opp => {
+      return !opportunities.some(other => {
+        if (other.id === opp.id) return false;
+        if (other.heatsSaved < opp.heatsSaved) return false;
+        if (!sourceEventsAreSubset(other, opp)) return false;
+        return isMoreSpecificTargetForSameSources(other, opp);
+      });
+    });
+  }
 
   function findOpportunities() {
     const opportunities = [];
-    const raceGroups = groupEventsByRace();
 
-    for (const [raceKey, evts] of raceGroups) {
-      // Sort events: prefer ordering by age group, then gender
-      const completeEvents = evts.filter(evt =>
-        eventAgeMin(evt) !== null &&
-        eventAgeMax(evt) !== null &&
-        heatsFor(evt.id).length > 0
-      );
-      const sorted = [...completeEvents].sort((a, b) => {
-        const ageDiff = Number(eventAgeMin(a)) - Number(eventAgeMin(b));
-        if (ageDiff !== 0) return ageDiff;
-        const maxAgeDiff = Number(eventAgeMax(a)) - Number(eventAgeMax(b));
-        if (maxAgeDiff !== 0) return maxAgeDiff;
-        const genderDiff = eventGender(a).localeCompare(eventGender(b));
-        if (genderDiff !== 0) return genderDiff;
-        return compareEventOrder(a, b);
-      });
+    for (const targetEvent of allEvents.filter(isMergeTarget).sort(compareEventOrder)) {
+      if (!hasRaceMetadata(targetEvent) || !hasAgeMetadata(targetEvent)) continue;
+      const compatibleSources = allEvents
+        .filter(evt => isSourceCompatibleWithTarget(evt, targetEvent))
+        .sort(compareAgeThenEventOrder);
+      const raceKey = `${eventDistance(targetEvent)}-${eventStrokeCode(targetEvent)}-${targetEvent.id}`;
 
-      // Try all pair combinations (younger → older, "swim up")
-      for (let i = 0; i < sorted.length; i++) {
-        for (let j = i + 1; j < sorted.length; j++) {
-          const srcEvt = sorted[i];
-          const tgtEvt = sorted[j];
-          const srcRecs = recordsFor(srcEvt.id);
-          const tgtRecs = recordsFor(tgtEvt.id);
-          const srcCount = srcRecs.length;
-          const tgtCount = tgtRecs.length;
+      const targetOpportunities = generateSourceSelections(targetEvent, compatibleSources)
+        .map(sourceEvents => makeOpportunity(targetEvent, sourceEvents, raceKey))
+        .filter(Boolean);
 
-          if (srcCount === 0) continue;
-          if (heatsFor(tgtEvt.id).length === 0) continue;
-
-          const srcHeats = currentHeatCount(srcEvt);
-          const tgtHeats = currentHeatCount(tgtEvt);
-          if (srcHeats === null || tgtHeats === null) continue;
-          const currentTotal = srcHeats + tgtHeats;
-          const combinedHeats = heatsNeeded(srcCount + tgtCount);
-          const saved = currentTotal - combinedHeats;
-
-          if (saved > 0) {
-            const srcGender = eventGender(srcEvt).toLowerCase();
-            const tgtGender = eventGender(tgtEvt).toLowerCase();
-            const sameGender = srcGender === tgtGender;
-
-            opportunities.push({
-              id: `${srcEvt.id}->${tgtEvt.id}`,
-              raceKey,
-              raceLabel: raceLabel(srcEvt),
-              sourceEvent: srcEvt,
-              targetEvent: tgtEvt,
-              sourceLabel: eventLabel(srcEvt),
-              targetLabel: eventLabel(tgtEvt),
-              sourceSwimmerCount: srcCount,
-              targetSwimmerCount: tgtCount,
-              currentHeats: currentTotal,
-              combinedHeats,
-              heatsSaved: saved,
-              sameGender,
-              sourceRecords: srcRecs,
-              targetRecords: tgtRecs,
-              missingHeatCount: 0,
-              canApply: true,
-            });
-            opportunities[opportunities.length - 1].missingHeatCount = missingHeatCountForOpportunity(opportunities[opportunities.length - 1]);
-          }
-        }
-      }
-
-      // Also check triple+ merges: combine all events of this race
-      if (sorted.length >= 3) {
-        const totalSwimmers = sorted.reduce((sum, e) => sum + recordsFor(e.id).length, 0);
-        const totalHeatsSeparate = sorted.reduce((sum, e) => {
-          return sum + currentHeatCount(e);
-        }, 0);
-        const combinedAll = heatsNeeded(totalSwimmers);
-        const savedAll = totalHeatsSeparate - combinedAll;
-        const target = sorted[sorted.length - 1];
-        const sourceCount = totalSwimmers - recordsFor(target.id).length;
-
-        if (savedAll > 0 && heatsFor(target.id).length > 0) {
-          // Only add if it saves MORE than any pair already found
-          const pairSaved = opportunities
-            .filter(o => o.raceKey === raceKey)
-            .reduce((max, o) => Math.max(max, o.heatsSaved), 0);
-
-          if (savedAll > pairSaved) {
-            opportunities.push({
-              id: sorted.map(e => e.id).join('+'),
-              raceKey,
-              raceLabel: raceLabel(sorted[0]),
-              sourceEvent: null, // multiple
-              targetEvent: target, // oldest event as target
-              sourceLabel: sorted.slice(0, -1).map(eventLabel).join(' + '),
-              targetLabel: eventLabel(target),
-              sourceSwimmerCount: sourceCount,
-              targetSwimmerCount: recordsFor(target.id).length,
-              currentHeats: totalHeatsSeparate,
-              combinedHeats: combinedAll,
-              heatsSaved: savedAll,
-              sameGender: false,
-              sourceRecords: sorted.slice(0, -1).flatMap(e => recordsFor(e.id)),
-              targetRecords: recordsFor(target.id),
-              allSourceEvents: sorted.slice(0, -1),
-              missingHeatCount: 0,
-              canApply: true,
-            });
-            opportunities[opportunities.length - 1].missingHeatCount = missingHeatCountForOpportunity(opportunities[opportunities.length - 1]);
-          }
-        }
-      }
+      opportunities.push(...filterStrictlyDiminishing(targetOpportunities));
     }
 
-    // Sort: most heats saved first, prefer same-gender
-    opportunities.sort((a, b) => {
+    const filteredOpportunities = filterBroaderNonImprovingTargets(opportunities);
+
+    filteredOpportunities.sort((a, b) => {
       if (b.heatsSaved !== a.heatsSaved) return b.heatsSaved - a.heatsSaved;
-      if (a.sameGender !== b.sameGender) return a.sameGender ? -1 : 1;
-      return 0;
+      if (b.sourceEvents.length !== a.sourceEvents.length) return b.sourceEvents.length - a.sourceEvents.length;
+      const ageSpanDiff = (Number(eventAgeMax(a.targetEvent)) - Number(eventAgeMin(a.targetEvent))) -
+        (Number(eventAgeMax(b.targetEvent)) - Number(eventAgeMin(b.targetEvent)));
+      if (ageSpanDiff !== 0) return ageSpanDiff;
+      const genderSpecificityDiff = targetGenderSpecificity(b.targetEvent) - targetGenderSpecificity(a.targetEvent);
+      if (genderSpecificityDiff !== 0) return genderSpecificityDiff;
+      return compareEventOrder(a.targetEvent, b.targetEvent);
     });
 
-    return opportunities;
+    return filteredOpportunities;
   }
 
   // ---- Rendering ----
@@ -863,37 +1105,49 @@
 
     let html = `
       <div class="mm-context">
-        <div class="mm-context-title">Best heat-saving options</div>
-        <div class="mm-context-copy">Each card moves all entries from the first event into the second event and compares current actual heats against the ${requireLaneCount()}-lane pool returned by Meet Maestro.</div>
+        <div class="mm-context-title">Best target-based merge options</div>
+        <div class="mm-context-copy">Each card moves entries from two or more compatible source events into a predefined letter-suffixed merge target and compares current actual heats against the ${requireLaneCount()}-lane pool returned by Meet Maestro.</div>
       </div>
     `;
 
-    // Group by race
-    const byRace = {};
+    let lastRaceKey = null;
     for (const opp of opportunities) {
-      if (!byRace[opp.raceKey]) byRace[opp.raceKey] = [];
-      byRace[opp.raceKey].push(opp);
-    }
+      if (opp.raceKey !== lastRaceKey) {
+        if (lastRaceKey !== null) html += '</div>';
+        html += `<div class="mm-race-group">
+          <div class="mm-race-header">${esc(opp.raceLabel || opp.raceKey.replace(/-/, ' '))}</div>`;
+        lastRaceKey = opp.raceKey;
+      }
 
-    for (const [raceKey, opps] of Object.entries(byRace)) {
-      html += `<div class="mm-race-group">
-        <div class="mm-race-header">${esc(opps[0].raceLabel || raceKey.replace(/-/, ' '))}</div>`;
+      const applied = appliedMerges.has(opp.id);
+      const hidden = hiddenOpportunities.has(opp.id);
+      if (hidden) {
+        html += `<div class="mm-opp-hidden" data-opp-id="${esc(opp.id)}">
+          <div class="mm-hidden-main">
+            <strong>Eliminates ${opp.heatsSaved} heat${opp.heatsSaved === 1 ? '' : 's'}</strong>
+            <span>${esc(opp.sourceEvents.length)} source${opp.sourceEvents.length === 1 ? '' : 's'} into ${esc(opp.targetLabel)}</span>
+          </div>
+          <button class="mm-btn mm-btn-secondary mm-btn-sm mm-unhide-opp" data-opp-id="${esc(opp.id)}">Unhide</button>
+        </div>`;
+        continue;
+      }
 
-      for (const opp of opps) {
-        const applied = appliedMerges.has(opp.id);
-        html += `<div class="mm-opp ${applied ? 'mm-applied' : ''}" data-opp-id="${esc(opp.id)}">
+      const diagnostic = idealTargetDiagnostic(opp);
+      html += `<div class="mm-opp ${applied ? 'mm-applied' : ''}" data-opp-id="${esc(opp.id)}">
           <div class="mm-opp-topline">
             <div class="mm-save-badge">Save ${opp.heatsSaved} heat${opp.heatsSaved > 1 ? 's' : ''}</div>
-            <div class="mm-pill-row">
-              ${!opp.sameGender ? '<span class="mm-cross-gender">Cross-gender</span>' : '<span class="mm-same-gender">Same gender</span>'}
-              ${opp.missingHeatCount > 0 ? `<span class="mm-needs-space">Adds ${opp.missingHeatCount} heat${opp.missingHeatCount === 1 ? '' : 's'}</span>` : '<span class="mm-ready">Ready</span>'}
-            </div>
           </div>
           <div class="mm-merge-grid">
             <div class="mm-event-box mm-event-source">
-              <span class="mm-event-box-label">Move from</span>
-              <strong>${esc(opp.sourceLabel)}</strong>
-              <span>${esc(opp.sourceEvent ? heatSummary(opp.sourceEvent) : `${opp.sourceSwimmerCount} entries`)}</span>
+              <span class="mm-event-box-label">Move from ${opp.sourceEvents.length} sources</span>
+              <div class="mm-source-list">
+                ${opp.sourceEvents.map(evt => `
+                  <div class="mm-source-item">
+                    <strong>${esc(eventLabel(evt))}</strong>
+                    <span>${esc(heatSummary(evt))}</span>
+                  </div>
+                `).join('')}
+              </div>
             </div>
             <div class="mm-merge-arrow">&rarr;</div>
             <div class="mm-event-box mm-event-target">
@@ -907,20 +1161,18 @@
             <div><span>After merge</span><strong>${opp.combinedHeats} heat${opp.combinedHeats === 1 ? '' : 's'}</strong></div>
             <div><span>Moved entries</span><strong>${opp.sourceSwimmerCount}</strong></div>
           </div>
-          ${opp.missingHeatCount > 0 ? `<div class="mm-warning">This merge needs ${opp.missingHeatCount} more target heat${opp.missingHeatCount === 1 ? '' : 's'}. The extension will add ${opp.missingHeatCount === 1 ? 'it' : 'them'} before moving swimmers.</div>` : ''}
+          ${diagnostic ? `<div class="mm-info">Why not a narrower target? ${esc(diagnostic)}</div>` : ''}
           <div class="mm-opp-actions">
+            <button class="mm-btn mm-btn-secondary mm-hide-opp" data-opp-id="${esc(opp.id)}">Hide</button>
             <button class="mm-btn mm-btn-secondary mm-preview-opp" data-opp-id="${esc(opp.id)}">Preview</button>
-            <button class="mm-btn mm-btn-secondary mm-organize-event" data-event-id="${esc(opp.targetEvent.id)}">Organize Target</button>
             <button class="mm-btn mm-btn-accent mm-apply-opp" data-opp-id="${esc(opp.id)}" ${applied ? 'disabled' : ''}>
-              ${applied ? 'Applied' : (opp.missingHeatCount > 0 ? 'Add Heats + Merge' : 'Apply Merge')}
+              ${applied ? 'Applied' : 'Merge'}
             </button>
           </div>
           <div class="mm-opp-detail" id="mm-detail-${esc(opp.id).replace(/[^a-zA-Z0-9]/g, '_')}" style="display:none"></div>
         </div>`;
-      }
-
-      html += '</div>';
     }
+    if (lastRaceKey !== null) html += '</div>';
 
     html += renderSeededEvents();
     el.innerHTML = html;
@@ -931,6 +1183,18 @@
     });
     el.querySelectorAll('.mm-apply-opp').forEach(btn => {
       btn.addEventListener('click', () => executeMerge(btn.dataset.oppId));
+    });
+    el.querySelectorAll('.mm-hide-opp').forEach(btn => {
+      btn.addEventListener('click', () => {
+        hiddenOpportunities.add(btn.dataset.oppId);
+        renderOpportunities(opportunities);
+      });
+    });
+    el.querySelectorAll('.mm-unhide-opp').forEach(btn => {
+      btn.addEventListener('click', () => {
+        hiddenOpportunities.delete(btn.dataset.oppId);
+        renderOpportunities(opportunities);
+      });
     });
     el.querySelectorAll('.mm-organize-event').forEach(btn => {
       btn.addEventListener('click', () => openOrganizer(btn.dataset.eventId));
@@ -949,16 +1213,18 @@
     const rows = seeded.map(evt => {
       const heats = heatsFor(evt.id);
       const entries = recordsFor(evt.id);
+      const needsOrganization = needsOrganizationEventIds.has(evt.id);
       const heatText = heats.length
         ? heats.map(h => {
           const count = entries.filter(r => r.relationships?.heat?.data?.id === h.id).length;
           return `H${h.attributes?.number || '?'}: ${count}`;
         }).join(' · ')
         : 'No heat resources';
-      return `<div class="mm-event-row">
+      return `<div class="mm-event-row ${needsOrganization ? 'mm-event-needs-organization' : ''}">
         <div>
           <strong>${esc(eventLabel(evt))}</strong>
           <span>${esc(raceLabel(evt))}</span>
+          ${needsOrganization ? '<span class="mm-needs-organization-label">Needs organization</span>' : ''}
         </div>
         <div class="mm-event-row-counts">${esc(heatSummary(evt))}<br>${esc(heatText)}</div>
         <div class="mm-event-row-actions">
@@ -1203,6 +1469,7 @@
         });
       }
 
+      await nudgeMeetMaestroView(a, [eventId]);
       setBusyMessage('Refreshing meet data...');
       await loadData();
     } catch (err) {
@@ -1414,6 +1681,7 @@
 
     try {
       await applyOrganizerAssignmentsSafely(eventId, a, assignments, targetByRecordId, button, savingLabel);
+      await nudgeMeetMaestroView(a, [eventId]);
       setBusyMessage('Refreshing meet data...');
       await loadData();
     } catch (err) {
@@ -1557,6 +1825,7 @@
       setBusyMessage(`Removing empty heats (${i + 1}/${eventIds.length})...`);
       try {
         await a.removeEmptyHeats(eventId);
+        await nudgeMeetMaestroView(a, [eventId]);
       } catch (err) {
         failures.push({ eventId, error: err.message });
       }
@@ -1594,6 +1863,17 @@
       assignments.push(entry);
     }
 
+    const existingHeatNumbers = assignments.map(a => a.heatNum).filter(number => Number.isFinite(Number(number)));
+    let nextHeatNumber = existingHeatNumbers.length ? Math.max(...existingHeatNumbers) + 1 : 1;
+    for (let i = 0; i < opp.missingHeatCount; i++) {
+      assignments.push({
+        heatId: `preview-new-${i + 1}`,
+        heatNum: nextHeatNumber++,
+        lanes: {},
+        isNew: true,
+      });
+    }
+
     // Add source swimmers into new/remaining lanes
     let srcSwimmers = [...opp.sourceRecords];
     let heatIdx = 0;
@@ -1618,12 +1898,7 @@
     // Render
     let html = '<div class="mm-preview"><div class="mm-preview-title">Preview: target heat layout after merge</div>';
     if (unplacedPreviewCount > 0) {
-      const missingHeatCount = missingHeatCountForOpportunity(opp);
-      if (missingHeatCount > 0) {
-        html += `<div class="mm-warning">${unplacedPreviewCount} swimmer${unplacedPreviewCount === 1 ? '' : 's'} need ${missingHeatCount} new target heat${missingHeatCount === 1 ? '' : 's'}. The merge flow will add ${missingHeatCount === 1 ? 'it' : 'them'} automatically.</div>`;
-      } else {
-        html += `<div class="mm-warning">${unplacedPreviewCount} swimmer${unplacedPreviewCount === 1 ? '' : 's'} cannot be placed in the current target heats.</div>`;
-      }
+      html += `<div class="mm-warning">${unplacedPreviewCount} swimmer${unplacedPreviewCount === 1 ? '' : 's'} cannot be placed in the current target layout.</div>`;
     }
 
     for (const a of assignments) {
@@ -1652,7 +1927,7 @@
 
     html += `<div class="mm-preview-legend">
       <span class="mm-legend-target">&bull;</span> Existing &nbsp;
-      <span class="mm-legend-source">&bull;</span> Swimming up
+      <span class="mm-legend-source">&bull;</span> Moving from source
     </div></div>`;
 
     detail.innerHTML = html;
@@ -1696,7 +1971,7 @@
     }
 
     if (opp.missingHeatCount > 0) {
-      const label = `Adding ${opp.missingHeatCount} target heat${opp.missingHeatCount === 1 ? '' : 's'}...`;
+      const label = 'Preparing target lanes...';
       if (btn) btn.textContent = label;
       setBusyMessage(label);
       for (let i = 0; i < opp.missingHeatCount; i++) {
@@ -1741,14 +2016,14 @@
     }
 
     if (srcSwimmers.length > 0) {
-      alert(`Cannot merge: ${srcSwimmers.length} swimmer(s) couldn't be placed. The target event may need more heats created first.`);
-      if (btn) { btn.disabled = false; btn.textContent = 'Apply Merge'; }
+      alert(`Cannot merge: ${srcSwimmers.length} swimmer(s) couldn't be placed in the target layout.`);
+      if (btn) { btn.disabled = false; btn.textContent = 'Merge'; }
       finish();
       return;
     }
 
     if (moves.length === 0) {
-      if (btn) { btn.disabled = false; btn.textContent = 'Apply Merge'; }
+      if (btn) { btn.disabled = false; btn.textContent = 'Merge'; }
       finish();
       return;
     }
@@ -1757,6 +2032,7 @@
       setBusyMessage(`Moving ${moves.length} swimmer${moves.length === 1 ? '' : 's'} into the target event...`);
       const results = await a.batchMove(moves);
       const failures = results.filter(r => !r.success);
+      const changedEventIds = cleanupEventIdsForMerge(opp);
 
       if (failures.length > 0) {
         console.error('[Merge Helper] some moves failed:', failures);
@@ -1779,13 +2055,15 @@
         }
       }
 
+      await nudgeMeetMaestroView(a, failures.length > 0 ? movedCleanupEventIds : changedEventIds);
       appliedMerges.add(oppId);
+      if (opp.targetEvent?.id) needsOrganizationEventIds.add(opp.targetEvent.id);
       setBusyMessage('Refreshing meet data...');
       await loadData();
     } catch (err) {
       console.error('[Merge Helper] merge failed:', err);
       alert('Merge failed: ' + err.message);
-      if (btn) { btn.disabled = false; btn.textContent = 'Apply Merge'; }
+      if (btn) { btn.disabled = false; btn.textContent = 'Merge'; }
     } finally {
       finish();
     }
