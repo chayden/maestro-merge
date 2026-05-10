@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 const { execFileSync } = require('node:child_process');
-const { existsSync, mkdirSync, rmSync } = require('node:fs');
-const { basename, join } = require('node:path');
+const { cpSync, existsSync, mkdirSync, rmSync } = require('node:fs');
+const { basename, dirname, join } = require('node:path');
 
 const root = process.cwd();
 const distDir = join(root, 'dist');
@@ -16,6 +16,7 @@ if (!existsSync(manifestPath)) {
 const manifest = require(manifestPath);
 const packageName = `meet-maestro-merge-helper-${manifest.version || 'dev'}.zip`;
 const packagePath = join(distDir, packageName);
+const unpackedDir = join(distDir, 'unpacked');
 
 const files = [
   'manifest.json',
@@ -35,8 +36,16 @@ if (missing.length > 0) {
 }
 
 mkdirSync(distDir, { recursive: true });
+rmSync(unpackedDir, { recursive: true, force: true });
 rmSync(packagePath, { force: true });
 
-execFileSync('zip', ['-X', '-q', packagePath, ...files], { cwd: root, stdio: 'inherit' });
+for (const file of files) {
+  const target = join(unpackedDir, file);
+  mkdirSync(dirname(target), { recursive: true });
+  cpSync(join(root, file), target);
+}
+
+execFileSync('zip', ['-X', '-q', packagePath, ...files], { cwd: unpackedDir, stdio: 'inherit' });
 
 console.log(`Created ${join('dist', basename(packagePath))}`);
+console.log(`Created ${join('dist', 'unpacked')} for chrome://extensions Load unpacked`);
