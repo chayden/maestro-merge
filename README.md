@@ -2,7 +2,24 @@
 
 Chrome extension for Meet Maestro that helps inspect meet events, merge compatible events, and organize swimmers across heats and lanes.
 
-## Build And Install Locally
+## Install From GitHub
+
+You do not need to use Terminal to install the extension from GitHub.
+
+1. Open the GitHub page for this project.
+2. Click the green **Code** button.
+3. Click **Download ZIP**.
+4. Find the downloaded ZIP file, usually in your Downloads folder.
+5. Double-click the ZIP file to unzip it.
+6. Open Chrome and go to `chrome://extensions`.
+7. Turn on **Developer mode**.
+8. Click **Load unpacked**.
+9. Select the unzipped project folder. This is the root folder, the one that contains `manifest.json`.
+10. Open a Meet Maestro session page and click the extension icon to open the merge panel directly.
+
+If Chrome asks you to choose a folder, choose the whole unzipped project folder, not a file inside it.
+
+## Build A Shareable Package
 
 Run:
 
@@ -12,20 +29,14 @@ npm run package
 
 This creates:
 
-- `dist/unpacked/` for local Chrome installation.
+- `dist/unpacked/`, a staged copy of the extension files used to create the ZIP.
 - `dist/meet-maestro-merge-helper-<version>.zip` for sharing or Chrome Web Store upload.
-
-Then install in Chrome:
-
-1. Open `chrome://extensions`.
-2. Enable Developer mode.
-3. Choose Load unpacked.
-4. Select `dist/unpacked/`.
-5. Open a Meet Maestro session page and click the extension icon to open the merge panel directly.
 
 ## Sharing
 
 For another person to install without the Chrome Web Store, send them the ZIP from `dist/`. They should unzip it, then use `chrome://extensions` -> Developer mode -> Load unpacked and select the unzipped folder.
+
+If they are downloading from GitHub instead, they should use **Code** -> **Download ZIP**, unzip the download, and select the unzipped root project folder when Chrome asks what folder to load.
 
 You do not need a `.crx` for local/developer installation. A `.crx` is mainly useful for Chrome Web Store or managed enterprise distribution, and Chrome generally discourages casual off-store CRX installs.
 
