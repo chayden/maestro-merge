@@ -5,6 +5,7 @@
   "description": "Chrome extension for merging and organizing Meet Maestro heats.",
   "scripts": {
     "check": "node --check background.js && node --check content.js && node --check lib/api.js",
+    "test": "node --test",
     "package": "node scripts/package-extension.js"
   }
 }

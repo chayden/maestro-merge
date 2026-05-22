@@ -994,6 +994,28 @@
     return filteredOpportunities;
   }
 
+  if (window.__mmMergeHelperTestMode) {
+    window.__mmMergeHelperTestHarness = {
+      setData(data = {}) {
+        allEvents = data.events || [];
+        allRecords = data.records || [];
+        allHeats = data.heats || [];
+        allAthletes = data.athletes || [];
+        allEventNodes = data.eventNodes || [];
+        allTeams = data.teams || [];
+        laneCount = data.laneCount ?? null;
+        appliedMerges = new Set();
+        hiddenOpportunities = new Set();
+        needsOrganizationEventIds = new Set();
+      },
+      findOpportunities,
+      generateSourceSelections,
+      isMergeTarget,
+      isSourceCompatibleWithTarget,
+      hasBalancedBoysGirlsSelection,
+    };
+  }
+
   // ---- Rendering ----
 
   function buildPanel() {
