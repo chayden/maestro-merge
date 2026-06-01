@@ -29,6 +29,7 @@
   let operationDepth = 0;
   let organizerLabelMode = 'initials';
   const meetMaestroRefreshReadDelayMs = 250;
+  const reloadRestoreKey = 'mmMergeHelperRestoreAfterReload';
 
   // ---- Auth & meet ID detection ----
 
@@ -47,6 +48,30 @@
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function readReloadRestoreState() {
+    try {
+      const raw = window.sessionStorage?.getItem(reloadRestoreKey);
+      if (!raw) return null;
+      window.sessionStorage.removeItem(reloadRestoreKey);
+      return JSON.parse(raw);
+    } catch (err) {
+      console.debug('[Merge Helper] reload restore read failed:', err);
+      return null;
+    }
+  }
+
+  function requestPageReload() {
+    try {
+      window.sessionStorage?.setItem(reloadRestoreKey, JSON.stringify({
+        view: currentView,
+        organizerEventId,
+      }));
+    } catch (err) {
+      console.debug('[Merge Helper] reload restore write failed:', err);
+    }
+    window.location.reload();
   }
 
   function handleLocationChange() {
@@ -130,6 +155,16 @@
     return null;
   }
 
+  async function waitForPageReady(timeoutMs = 15000) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      extractIdsFromURL();
+      if (document.readyState === 'complete' && meetId && sessionId) return true;
+      await sleep(250);
+    }
+    return false;
+  }
+
   // ---- Messaging from popup ----
 
   chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
@@ -163,8 +198,8 @@
 
   // ---- Data loading ----
 
-  async function loadData() {
-    const a = await waitForAPI();
+  async function loadData(options = {}) {
+    const a = await waitForAPI(options.apiRetries, options.apiDelayMs);
     if (!a) {
       const c = document.getElementById('mm-body');
       if (c) c.innerHTML = '<div class="mm-error">Waiting for Meet Maestro session data or API auth. Give the page a moment and try again.</div>';
@@ -504,7 +539,7 @@
 
   function laneSeedOrder() {
     const laneTotal = requireLaneCount();
-    const preferredSixLaneOrder = [4, 3, 5, 2, 6, 1];
+    const preferredSixLaneOrder = [3, 4, 2, 5, 1, 6];
     if (laneTotal === 6) return preferredSixLaneOrder;
 
     const centerHigh = Math.floor(laneTotal / 2) + 1;
@@ -517,6 +552,64 @@
       if (low >= 1 && !order.includes(low)) order.push(low);
     }
     return order;
+  }
+
+  function heatSizesForEntryCount(entryCount, laneTotal = requireLaneCount()) {
+    const count = Number(entryCount);
+    const lanes = Number(laneTotal);
+    if (!Number.isInteger(count) || count < 0) return [];
+    if (!Number.isInteger(lanes) || lanes <= 0) {
+      throw new Error('Meet Maestro did not return a valid pool lane count.');
+    }
+    if (count === 0) return [];
+
+    const heatCount = Math.ceil(count / lanes);
+    const partial = count % lanes;
+    const sizes = partial === 0
+      ? Array(heatCount).fill(lanes)
+      : [partial, ...Array(heatCount - 1).fill(lanes)];
+
+    while (sizes.length > 1 && sizes[0] > 0 && sizes[0] < 3) {
+      const donorIndex = sizes
+        .map((size, index) => ({ size, index }))
+        .reverse()
+        .find(({ size, index }) => index > 0 && size - 1 >= sizes[0] + 1)?.index;
+      if (donorIndex === undefined) break;
+      sizes[0]++;
+      sizes[donorIndex]--;
+      sizes.sort((a, b) => a - b);
+    }
+
+    return sizes;
+  }
+
+  function chunkRecordsByHeatSize(records, heatSizes) {
+    const chunks = [];
+    let cursor = 0;
+    heatSizes.forEach(size => {
+      chunks.push(records.slice(cursor, cursor + size));
+      cursor += size;
+    });
+    return chunks;
+  }
+
+  function lanePlacementsForEmptyHeats(sourceRecords, heatAssignments) {
+    const heatSizes = heatSizesForEntryCount(sourceRecords.length);
+    if (heatAssignments.length < heatSizes.length) return null;
+
+    const lanes = laneSeedOrder();
+    return chunkRecordsByHeatSize(sourceRecords.slice().sort(compareSlowestFirst), heatSizes)
+      .flatMap((heatRecords, heatIndex) => {
+        const heatAssignment = heatAssignments[heatIndex];
+        return heatRecords
+          .slice()
+          .sort(compareFastestFirst)
+          .map((record, laneIndex) => ({
+            record,
+            heatAssignment,
+            laneNumber: lanes[laneIndex],
+          }));
+      });
   }
 
   function updateLaneCountFromMeet(data) {
@@ -894,6 +987,117 @@
     return `${min}-${max}`;
   }
 
+  function suggestedTargetLabel(evt) {
+    return `${targetGenderLabel(eventGender(evt))} ${targetAgeLabel(Number(eventAgeMin(evt)), Number(eventAgeMax(evt)))} ${raceLabel(evt)}`;
+  }
+
+  function sourceRaceKey(evt) {
+    return `${eventDistance(evt)}-${eventStrokeCode(evt)}`;
+  }
+
+  function makeVirtualMergeTarget(sourceEvents, raceSource, gender) {
+    const envelope = sourceAgeEnvelope(sourceEvents);
+    if (envelope.min === null || envelope.max === null) return null;
+    const ageLabel = targetAgeLabel(envelope.min, envelope.max);
+    const sourceAttributes = raceSource.attributes || {};
+    const strokeLabel = sourceAttributes.strokeLabel || sourceAttributes.label || sourceAttributes.fullLabel || '';
+    return {
+      id: `suggested-target:${gender}:${envelope.min}-${envelope.max}:${sourceRaceKey(raceSource)}`,
+      attributes: {
+        eventNumber: 'Add letter-suffixed target',
+        athleteGender: gender,
+        athleteMinAge: envelope.min,
+        athleteMaxAge: envelope.max,
+        strokeCode: eventStrokeCode(raceSource),
+        distance: eventDistance(raceSource),
+        label: strokeLabel,
+        ageGroupName: ageLabel,
+        sessionIndex: eventSortValue(sourceEvents[0]) ?? eventSortValue(raceSource) ?? Number.MAX_SAFE_INTEGER,
+      },
+      suggestedTarget: true,
+    };
+  }
+
+  function existingMergeTargetCanAccept(sourceEvents, suggestedTarget) {
+    return allEvents.some(evt =>
+      isMergeTarget(evt) &&
+      evt.id !== suggestedTarget.id &&
+      String(eventStrokeCode(evt)) === String(eventStrokeCode(suggestedTarget)) &&
+      String(eventDistance(evt)) === String(eventDistance(suggestedTarget)) &&
+      sourceEvents.every(source => isSourceCompatibleWithTarget(source, evt))
+    );
+  }
+
+  function buildSuggestedTargetOpportunity(sourceEvents, raceSource) {
+    const gender = sourceTargetGender(sourceEvents);
+    const targetEvent = makeVirtualMergeTarget(sourceEvents, raceSource, gender);
+    if (!targetEvent) return null;
+    if (!sourceEvents.every(source => isSourceCompatibleWithTarget(source, targetEvent))) return null;
+    if (existingMergeTargetCanAccept(sourceEvents, targetEvent)) return null;
+
+    const opportunity = makeOpportunity(targetEvent, sourceEvents, `${sourceRaceKey(raceSource)}:suggested-target`);
+    if (!opportunity) return null;
+    opportunity.id = `suggested:${opportunity.id}`;
+    opportunity.canApply = false;
+    opportunity.suggestedTarget = {
+      gender,
+      ageMin: Number(eventAgeMin(targetEvent)),
+      ageMax: Number(eventAgeMax(targetEvent)),
+      strokeCode: eventStrokeCode(targetEvent),
+      distance: eventDistance(targetEvent),
+      label: suggestedTargetLabel(targetEvent),
+    };
+    opportunity.targetLabel = opportunity.suggestedTarget.label;
+    return opportunity;
+  }
+
+  function findSuggestedMergeTargets() {
+    const suggestions = new Map();
+    const sourceCandidates = allEvents
+      .filter(evt => !isMergeTarget(evt) && hasRaceMetadata(evt) && hasAgeMetadata(evt))
+      .sort(compareAgeThenEventOrder);
+    const eventsByRace = new Map();
+
+    sourceCandidates.forEach(evt => {
+      const key = sourceRaceKey(evt);
+      if (!eventsByRace.has(key)) eventsByRace.set(key, []);
+      eventsByRace.get(key).push(evt);
+    });
+
+    for (const raceEvents of eventsByRace.values()) {
+      const raceSource = raceEvents[0];
+      const raceEnvelope = sourceAgeEnvelope(raceEvents);
+      if (raceEnvelope.min === null || raceEnvelope.max === null) continue;
+
+      ['M', 'F', 'X'].forEach(gender => {
+        const broadTarget = makeVirtualMergeTarget(raceEvents, raceSource, gender);
+        if (!broadTarget) return;
+        broadTarget.attributes.athleteMinAge = raceEnvelope.min;
+        broadTarget.attributes.athleteMaxAge = raceEnvelope.max;
+        broadTarget.attributes.ageGroupName = targetAgeLabel(raceEnvelope.min, raceEnvelope.max);
+
+        const compatibleSources = raceEvents
+          .filter(evt => isSourceCompatibleWithTarget(evt, broadTarget))
+          .sort(compareAgeThenEventOrder);
+        generateSourceSelections(broadTarget, compatibleSources).forEach(sourceEvents => {
+          const suggestion = buildSuggestedTargetOpportunity(sourceEvents, raceSource);
+          if (!suggestion) return;
+          suggestions.set(`${sourceEventsKey(sourceEvents)}|${suggestion.suggestedTarget.gender}|${suggestion.suggestedTarget.ageMin}-${suggestion.suggestedTarget.ageMax}|${sourceRaceKey(raceSource)}`, suggestion);
+        });
+      });
+    }
+
+    const filteredSuggestions = filterBroaderNonImprovingTargets(filterStrictlyDiminishing(Array.from(suggestions.values())));
+    filteredSuggestions.sort((a, b) => {
+      if (b.heatsSaved !== a.heatsSaved) return b.heatsSaved - a.heatsSaved;
+      if (b.sourceEvents.length !== a.sourceEvents.length) return b.sourceEvents.length - a.sourceEvents.length;
+      const raceDiff = (a.raceLabel || '').localeCompare(b.raceLabel || '');
+      if (raceDiff !== 0) return raceDiff;
+      return compareAgeThenEventOrder(a.sourceEvents[0], b.sourceEvents[0]);
+    });
+    return filteredSuggestions;
+  }
+
   function idealTargetDiagnostic(opp) {
     const envelope = sourceAgeEnvelope(opp.sourceEvents);
     if (envelope.min === null || envelope.max === null) return null;
@@ -1009,7 +1213,10 @@
         needsOrganizationEventIds = new Set();
       },
       findOpportunities,
+      findSuggestedMergeTargets,
       generateSourceSelections,
+      heatSizesForEntryCount,
+      laneSeedOrder,
       isMergeTarget,
       isSourceCompatibleWithTarget,
       hasBalancedBoysGirlsSelection,
@@ -1034,8 +1241,7 @@
           <div class="mm-header-subtitle">${meetId ? `Meet ${esc(meetId)}` : 'Meet'}${sessionId ? ` · Session ${esc(sessionId)}` : ''}</div>
         </div>
         <div class="mm-header-actions">
-          <button class="mm-btn mm-btn-sm" id="mm-reload">Refresh</button>
-          <button class="mm-btn mm-btn-sm mm-btn-secondary" id="mm-page-reload">Reload Page</button>
+          <button class="mm-btn mm-btn-sm" id="mm-reload">Refresh Data</button>
           <button class="mm-btn mm-btn-sm" id="mm-close">&times;</button>
         </div>
       </div>
@@ -1059,9 +1265,6 @@
     });
     document.getElementById('mm-reload').addEventListener('click', () => {
       withBusy('Refreshing meet data...', () => loadData()).catch(() => {});
-    });
-    document.getElementById('mm-page-reload').addEventListener('click', () => {
-      window.location.reload();
     });
   }
 
@@ -1110,6 +1313,7 @@
   function renderOpportunities(opportunities) {
     const el = document.getElementById('mm-body');
     if (!el) return;
+    const targetSuggestions = findSuggestedMergeTargets();
 
     if (opportunities.length === 0) {
       el.innerHTML = `
@@ -1117,11 +1321,10 @@
           <div class="mm-empty-title">No heat-saving merges found</div>
           <div class="mm-empty-copy">The loaded entries already fit within the current lane count, or there are no compatible seeded events to combine.</div>
         </div>
+        ${renderSuggestedMergeTargets(targetSuggestions)}
         ${renderSeededEvents()}
       `;
-      el.querySelectorAll('.mm-organize-event').forEach(btn => {
-        btn.addEventListener('click', () => openOrganizer(btn.dataset.eventId));
-      });
+      wireDashboardButtons(el, opportunities);
       return;
     }
 
@@ -1196,31 +1399,91 @@
     }
     if (lastRaceKey !== null) html += '</div>';
 
+    html += renderSuggestedMergeTargets(targetSuggestions);
     html += renderSeededEvents();
     el.innerHTML = html;
 
-    // Wire up buttons
-    el.querySelectorAll('.mm-preview-opp').forEach(btn => {
+    wireDashboardButtons(el, opportunities);
+  }
+
+  function wireDashboardButtons(root, opportunities) {
+    root.querySelectorAll('.mm-preview-opp').forEach(btn => {
       btn.addEventListener('click', () => togglePreview(btn.dataset.oppId));
     });
-    el.querySelectorAll('.mm-apply-opp').forEach(btn => {
+    root.querySelectorAll('.mm-apply-opp').forEach(btn => {
       btn.addEventListener('click', () => executeMerge(btn.dataset.oppId));
     });
-    el.querySelectorAll('.mm-hide-opp').forEach(btn => {
+    root.querySelectorAll('.mm-hide-opp').forEach(btn => {
       btn.addEventListener('click', () => {
         hiddenOpportunities.add(btn.dataset.oppId);
         renderOpportunities(opportunities);
       });
     });
-    el.querySelectorAll('.mm-unhide-opp').forEach(btn => {
+    root.querySelectorAll('.mm-unhide-opp').forEach(btn => {
       btn.addEventListener('click', () => {
         hiddenOpportunities.delete(btn.dataset.oppId);
         renderOpportunities(opportunities);
       });
     });
-    el.querySelectorAll('.mm-organize-event').forEach(btn => {
+    root.querySelectorAll('.mm-organize-event').forEach(btn => {
       btn.addEventListener('click', () => openOrganizer(btn.dataset.eventId));
     });
+  }
+
+  function renderSuggestedMergeTargets(suggestions) {
+    if (!suggestions.length) return '';
+
+    return `<div class="mm-suggestions">
+      <div class="mm-context">
+        <div class="mm-context-title">Targets that would enable merges</div>
+        <div class="mm-context-copy">These seeded source events would save heats if a compatible letter-suffixed merge target were added to the meet template.</div>
+      </div>
+      ${suggestions.map(suggestion => {
+        const hidden = hiddenOpportunities.has(suggestion.id);
+        if (hidden) {
+          return `<div class="mm-opp-hidden" data-opp-id="${esc(suggestion.id)}">
+            <div class="mm-hidden-main">
+              <strong>Could save ${suggestion.heatsSaved} heat${suggestion.heatsSaved === 1 ? '' : 's'}</strong>
+              <span>Add ${esc(suggestion.suggestedTarget.label)} for ${esc(suggestion.sourceEvents.length)} eligible source${suggestion.sourceEvents.length === 1 ? '' : 's'}</span>
+            </div>
+            <button class="mm-btn mm-btn-secondary mm-btn-sm mm-unhide-opp" data-opp-id="${esc(suggestion.id)}">Unhide</button>
+          </div>`;
+        }
+
+        return `<div class="mm-suggestion">
+          <div class="mm-opp-topline">
+            <div class="mm-save-badge">Could save ${suggestion.heatsSaved} heat${suggestion.heatsSaved > 1 ? 's' : ''}</div>
+          </div>
+          <div class="mm-merge-grid">
+            <div class="mm-event-box mm-event-source">
+              <span class="mm-event-box-label">Eligible sources</span>
+              <div class="mm-source-list">
+                ${suggestion.sourceEvents.map(evt => `
+                  <div class="mm-source-item">
+                    <strong>${esc(eventLabel(evt))}</strong>
+                    <span>${esc(heatSummary(evt))}</span>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+            <div class="mm-merge-arrow">&rarr;</div>
+            <div class="mm-event-box mm-event-target">
+              <span class="mm-event-box-label">Add target</span>
+              <strong>${esc(suggestion.suggestedTarget.label)}</strong>
+              <span>${esc(suggestion.suggestedTarget.distance)}m ${esc(suggestion.suggestedTarget.strokeCode)} · ${esc(targetGenderLabel(suggestion.suggestedTarget.gender))} · ${esc(targetAgeLabel(suggestion.suggestedTarget.ageMin, suggestion.suggestedTarget.ageMax))}</span>
+            </div>
+          </div>
+          <div class="mm-metrics">
+            <div><span>Current</span><strong>${suggestion.currentHeats} heat${suggestion.currentHeats === 1 ? '' : 's'}</strong></div>
+            <div><span>With target</span><strong>${suggestion.combinedHeats} heat${suggestion.combinedHeats === 1 ? '' : 's'}</strong></div>
+            <div><span>Moved entries</span><strong>${suggestion.sourceSwimmerCount}</strong></div>
+          </div>
+          <div class="mm-opp-actions">
+            <button class="mm-btn mm-btn-secondary mm-hide-opp" data-opp-id="${esc(suggestion.id)}">Hide</button>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
   }
 
   function renderSeededEvents() {
@@ -1354,8 +1617,16 @@
             <span>Fill heats from slowest to fastest; fastest in each heat gets the preferred center lane.</span>
           </div>
           <div>
+            <button class="mm-btn mm-btn-secondary mm-sort-fast">Sort Fastest To Slowest</button>
+            <span>Fill heats from fastest to slowest; smaller heats, when needed, stay at the slow end.</span>
+          </div>
+          <div>
             <button class="mm-btn mm-btn-secondary mm-group-gender">Group Boys / Girls</button>
             <span>Use the fewest heats possible, then keep heats single-gender where possible. Mixed heats put girls on low lanes and boys on high lanes.</span>
+          </div>
+          <div>
+            <button class="mm-btn mm-btn-reload mm-page-reload">Reload Page</button>
+            <span>Some saved changes may not be reflected in Meet Maestro until the page is reloaded.</span>
           </div>
         </div>
       </div>
@@ -1363,6 +1634,8 @@
 
     el.querySelector('.mm-back-dashboard')?.addEventListener('click', () => renderDashboard());
     el.querySelector('.mm-sort-slow')?.addEventListener('click', event => organizeSlowestToFastest(eventId, event.currentTarget));
+    el.querySelector('.mm-sort-fast')?.addEventListener('click', event => organizeFastestToSlowest(eventId, event.currentTarget));
+    el.querySelector('.mm-page-reload')?.addEventListener('click', () => requestPageReload());
     el.querySelector('.mm-group-gender')?.addEventListener('click', event => organizeByGender(eventId, event.currentTarget));
     el.querySelectorAll('.mm-segmented-btn').forEach(button => {
       button.addEventListener('click', () => {
@@ -1559,16 +1832,50 @@
   async function organizeSlowestToFastest(eventId, button) {
     const sortedRecords = recordsFor(eventId).slice().sort(compareSlowestFirst);
     const heats = heatsFor(eventId);
+    const heatSizes = heatSizesForEntryCount(sortedRecords.length);
+    const targetHeats = heats.slice(0, heatSizes.length);
     const lanes = laneSeedOrder();
     const assignments = [];
 
-    heats.forEach((heat, heatIndex) => {
-      const heatNumber = heatNumberFor(heat, 'target heat');
-      const heatRecords = sortedRecords
-        .slice(heatIndex * requireLaneCount(), heatIndex * requireLaneCount() + requireLaneCount())
-        .sort(compareFastestFirst);
+    if (targetHeats.length < heatSizes.length) {
+      alert('Could not find enough heats to organize this event. Refresh meet data and try again.');
+      return;
+    }
 
-      heatRecords.forEach((record, laneIndex) => {
+    chunkRecordsByHeatSize(sortedRecords, heatSizes).forEach((heatRecords, heatIndex) => {
+      const heat = targetHeats[heatIndex];
+      const heatNumber = heatNumberFor(heat, 'target heat');
+
+      heatRecords.slice().sort(compareFastestFirst).forEach((record, laneIndex) => {
+        assignments.push(buildAssignment(record, {
+          heatId: heat.id,
+          heatNumber,
+          laneNumber: lanes[laneIndex],
+        }));
+      });
+    });
+
+    await applyOrganizerAssignments(eventId, assignments, button, 'Sorting...');
+  }
+
+  async function organizeFastestToSlowest(eventId, button) {
+    const sortedRecords = recordsFor(eventId).slice().sort(compareFastestFirst);
+    const heats = heatsFor(eventId);
+    const heatSizes = heatSizesForEntryCount(sortedRecords.length).slice().reverse();
+    const targetHeats = heats.slice(0, heatSizes.length);
+    const lanes = laneSeedOrder();
+    const assignments = [];
+
+    if (targetHeats.length < heatSizes.length) {
+      alert('Could not find enough heats to organize this event. Refresh meet data and try again.');
+      return;
+    }
+
+    chunkRecordsByHeatSize(sortedRecords, heatSizes).forEach((heatRecords, heatIndex) => {
+      const heat = targetHeats[heatIndex];
+      const heatNumber = heatNumberFor(heat, 'target heat');
+
+      heatRecords.slice().sort(compareFastestFirst).forEach((record, laneIndex) => {
         assignments.push(buildAssignment(record, {
           heatId: heat.id,
           heatNumber,
@@ -1584,19 +1891,25 @@
     const heats = heatsFor(eventId);
     const records = recordsFor(eventId);
     const laneTotal = requireLaneCount();
-    const heatCountNeeded = Math.ceil(records.length / laneTotal);
+    const heatCountNeeded = heatSizesForEntryCount(records.length, laneTotal).length;
     const targetHeats = heats.slice(0, heatCountNeeded);
     const groups = {
-      F: records.filter(r => athleteGender(r) === 'F').sort(compareFastestFirst),
-      M: records.filter(r => athleteGender(r) === 'M').sort(compareFastestFirst),
-      O: records.filter(r => !['F', 'M'].includes(athleteGender(r))).sort(compareFastestFirst),
+      F: records.filter(r => athleteGender(r) === 'F').sort(compareSlowestFirst),
+      M: records.filter(r => athleteGender(r) === 'M').sort(compareSlowestFirst),
+      O: records.filter(r => !['F', 'M'].includes(athleteGender(r))).sort(compareSlowestFirst),
     };
+
+    if (targetHeats.length < heatCountNeeded) {
+      alert('Could not find enough heats to organize this event. Refresh meet data and try again.');
+      return;
+    }
 
     const chunks = [];
     for (const gender of ['F', 'M', 'O']) {
-      for (let i = 0; i < groups[gender].length; i += laneTotal) {
-        chunks.push({ genders: new Set([gender]), records: groups[gender].slice(i, i + laneTotal) });
-      }
+      chunkRecordsByHeatSize(groups[gender], heatSizesForEntryCount(groups[gender].length, laneTotal))
+        .forEach(chunk => {
+          chunks.push({ genders: new Set([gender]), records: chunk });
+        });
     }
 
     while (chunks.length > targetHeats.length) {
@@ -1901,6 +2214,16 @@
     let heatIdx = 0;
     let unplacedPreviewCount = 0;
 
+    if (opp.targetRecords.length === 0) {
+      const placements = lanePlacementsForEmptyHeats(opp.sourceRecords, assignments);
+      if (placements) {
+        placements.forEach(({ record, heatAssignment, laneNumber }) => {
+          heatAssignment.lanes[laneNumber] = { ...record, _fromSource: true };
+        });
+        srcSwimmers = [];
+      }
+    }
+
     while (srcSwimmers.length > 0) {
       if (heatIdx >= assignments.length) {
         unplacedPreviewCount = srcSwimmers.length;
@@ -1908,7 +2231,8 @@
       }
 
       const assignment = assignments[heatIdx];
-      for (let lane = 1; lane <= maxLane && srcSwimmers.length > 0; lane++) {
+      for (const lane of laneSeedOrder()) {
+        if (srcSwimmers.length === 0) break;
         if (!assignment.lanes[lane]) {
           const rec = srcSwimmers.shift();
           assignment.lanes[lane] = { ...rec, _fromSource: true };
@@ -2013,6 +2337,22 @@
     let heatIdx = 0;
     const srcSwimmers = [...opp.sourceRecords];
 
+    if (opp.targetRecords.length === 0) {
+      const placements = lanePlacementsForEmptyHeats(opp.sourceRecords, heatAssignments);
+      if (placements) {
+        placements.forEach(({ record, heatAssignment, laneNumber }) => {
+          moves.push({
+            sourceRecord: record,
+            eventId: opp.targetEvent.id,
+            heatId: heatAssignment.heatId,
+            heatNumber: heatAssignment.heatNum,
+            laneNumber,
+          });
+        });
+        srcSwimmers.length = 0;
+      }
+    }
+
     while (srcSwimmers.length > 0) {
       if (heatIdx >= heatAssignments.length) {
         // No more existing heats — can't auto-assign without creating new heats
@@ -2021,7 +2361,8 @@
       }
 
       const ha = heatAssignments[heatIdx];
-      for (let lane = 1; lane <= laneTotal && srcSwimmers.length > 0; lane++) {
+      for (const lane of laneSeedOrder()) {
+        if (srcSwimmers.length === 0) break;
         if (!ha.occupied.has(lane)) {
           const rec = srcSwimmers.shift();
           moves.push({
@@ -2089,5 +2430,21 @@
     } finally {
       finish();
     }
+  }
+
+  const reloadRestoreState = readReloadRestoreState();
+  if (reloadRestoreState) {
+    (async () => {
+      await waitForPageReady();
+      await sleep(750);
+      buildPanel();
+      panelVisible = true;
+      mergePanel.style.display = 'flex';
+      if (reloadRestoreState.view === 'organizer' && reloadRestoreState.organizerEventId) {
+        currentView = 'organizer';
+        organizerEventId = reloadRestoreState.organizerEventId;
+      }
+      withBusy('Loading meet data...', () => loadData({ apiRetries: 30, apiDelayMs: 500 })).catch(() => {});
+    })();
   }
 })();

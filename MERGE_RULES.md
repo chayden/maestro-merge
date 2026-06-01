@@ -10,6 +10,8 @@ Regular numbered events, such as `1`, `5`, or `12`, are never used as merge targ
 
 Letter-suffixed events are treated as targets only. They are never used as source events.
 
+If compatible source events could save heats but no loaded merge target can accept them, the extension can suggest the target event metadata to add to the meet template. The suggestion uses the same compatibility, source-group, gender-balance, and heat-saving rules as normal merge opportunities.
+
 ## Compatible Sources
 
 A source event can merge into a target only when all of these are true:
@@ -81,6 +83,19 @@ The larger option is hidden only when a smaller subset saves the same number of 
 For example, if `6 & Under + 7-8` saves one heat and `6 & Under + 7-8 + 9-10` also saves one heat, the larger option is hidden.
 
 If the larger option saves more heats than every smaller subset, it remains visible.
+
+## Missing Target Suggestions
+
+When a heat-saving source group has no compatible letter-suffixed target, the extension may show a non-actionable suggestion for the event to add.
+
+The suggested target uses:
+
+- the same stroke and distance as the sources
+- the narrowest age range that contains the selected sources
+- a gender-specific target for boys-only or girls-only groups
+- a mixed target for balanced boys/girls groups
+
+Suggestions are hidden when an existing merge target can already accept that source group.
 
 ## More Specific Targets
 
