@@ -45,6 +45,7 @@ The package script uses an explicit allowlist of extension files so local HAR ca
 ## Features
 
 - Finds target-based multi-source merge opportunities that can reduce heat count.
+- Suggests missing merge target metadata when current entries could save heats but no compatible target exists.
 - Loads events, heats, lanes, athletes, and seed times from the Meet Maestro API.
 - Moves swimmers between events using the same event-record calls Meet Maestro uses.
 - Provides an organizer view for reseating swimmers within an event.

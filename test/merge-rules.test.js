@@ -165,6 +165,24 @@ test('source compatibility spells out every gate before a merge can be considere
   assert.equal(harness.isSourceCompatibleWithTarget(boysSource, targetTooOld), false, 'target maximum age cannot exclude the source maximum');
 });
 
+test('six-lane assignments use the Meet Maestro lane preference order', () => {
+  const harness = loadMergeTestHarness();
+
+  harness.setData({ laneCount: 6 });
+
+  assert.deepEqual(harness.laneSeedOrder(), [3, 4, 2, 5, 1, 6]);
+});
+
+test('heat sizing keeps smaller heats slow and avoids one or two swimmer heats when possible', () => {
+  const harness = loadMergeTestHarness();
+
+  assert.deepEqual(harness.heatSizesForEntryCount(8, 6), [3, 5]);
+  assert.deepEqual(harness.heatSizesForEntryCount(7, 6), [3, 4]);
+  assert.deepEqual(harness.heatSizesForEntryCount(13, 6), [3, 5, 5]);
+  assert.deepEqual(harness.heatSizesForEntryCount(12, 6), [6, 6]);
+  assert.deepEqual(harness.heatSizesForEntryCount(5, 4), [2, 3], 'a two-swimmer heat remains only when it cannot be avoided with the minimum heat count');
+});
+
 test('findOpportunities considers only letter-suffixed targets with at least two non-empty compatible sources', () => {
   const harness = loadMergeTestHarness();
   const boys = meetEvent('boys-7-8', { number: '1', gender: 'M', min: 7, max: 8 });
@@ -195,6 +213,95 @@ test('findOpportunities considers only letter-suffixed targets with at least two
   });
 
   assert.deepEqual(harness.findOpportunities(), [], 'a single source is not offered even when moving it alone would reduce heats');
+});
+
+test('missing target suggestions describe the event metadata that would enable a merge', () => {
+  const harness = loadMergeTestHarness();
+  const boys = meetEvent('boys-7-8', { number: '1', gender: 'M', min: 7, max: 8 });
+  const girls = meetEvent('girls-7-8', { number: '2', gender: 'F', min: 7, max: 8 });
+
+  loadMeet(harness, {
+    events: [boys, girls],
+    entries: { [boys.id]: 2, [girls.id]: 2 },
+  });
+
+  assert.deepEqual(harness.findOpportunities(), [], 'no real opportunity exists without a letter-suffixed target');
+
+  const [suggestion] = harness.findSuggestedMergeTargets();
+  assert.ok(suggestion, 'a target suggestion should be produced from the current merge rules');
+  assert.deepEqual(opportunitySourceIds(suggestion), [boys.id, girls.id].sort());
+  assert.equal(suggestion.suggestedTarget.gender, 'X');
+  assert.equal(suggestion.suggestedTarget.ageMin, 7);
+  assert.equal(suggestion.suggestedTarget.ageMax, 8);
+  assert.equal(suggestion.suggestedTarget.label, 'Mixed 7-8 25m Freestyle');
+  assert.equal(suggestion.heatsSaved, 1);
+  assert.equal(suggestion.canApply, false);
+});
+
+test('missing target suggestions are suppressed when a compatible merge target already exists', () => {
+  const harness = loadMergeTestHarness();
+  const boys = meetEvent('boys-7-8', { number: '1', gender: 'M', min: 7, max: 8 });
+  const girls = meetEvent('girls-7-8', { number: '2', gender: 'F', min: 7, max: 8 });
+  const target = meetEvent('mixed-target', { number: '1A', gender: 'X', min: 7, max: 8 });
+
+  loadMeet(harness, {
+    events: [boys, girls, target],
+    entries: { [boys.id]: 2, [girls.id]: 2 },
+  });
+
+  assert.equal(harness.findOpportunities().length, 1);
+  assert.deepEqual(harness.findSuggestedMergeTargets(), []);
+});
+
+test('missing target suggestions can coexist with real merge opportunities for other sources', () => {
+  const harness = loadMergeTestHarness();
+  const boysSevenEight = meetEvent('boys-7-8', { number: '1', gender: 'M', min: 7, max: 8 });
+  const boysNineTen = meetEvent('boys-9-10', { number: '2', gender: 'M', min: 9, max: 10 });
+  const girlsSevenEight = meetEvent('girls-7-8', { number: '3', gender: 'F', min: 7, max: 8 });
+  const girlsNineTen = meetEvent('girls-9-10', { number: '4', gender: 'F', min: 9, max: 10 });
+  const boysTarget = meetEvent('boys-target', { number: '1A', gender: 'M', min: 7, max: 10 });
+
+  loadMeet(harness, {
+    events: [boysSevenEight, boysNineTen, girlsSevenEight, girlsNineTen, boysTarget],
+    entries: {
+      [boysSevenEight.id]: 2,
+      [boysNineTen.id]: 2,
+      [girlsSevenEight.id]: 2,
+      [girlsNineTen.id]: 2,
+    },
+  });
+
+  assert.equal(harness.findOpportunities().length, 1);
+
+  const [suggestion] = harness.findSuggestedMergeTargets();
+  assert.deepEqual(opportunitySourceIds(suggestion), [
+    boysSevenEight.id,
+    boysNineTen.id,
+    girlsSevenEight.id,
+    girlsNineTen.id,
+  ].sort());
+  assert.equal(suggestion.suggestedTarget.gender, 'X');
+  assert.equal(suggestion.suggestedTarget.ageMin, 7);
+  assert.equal(suggestion.suggestedTarget.ageMax, 10);
+});
+
+test('missing target suggestions use current contiguous age and gender-balance rules', () => {
+  const harness = loadMergeTestHarness();
+  const boysSevenEight = meetEvent('boys-7-8', { number: '1', gender: 'M', min: 7, max: 8 });
+  const girlsSevenEightEmpty = meetEvent('girls-7-8-empty', { number: '2', gender: 'F', min: 7, max: 8 });
+  const boysNineTenEmpty = meetEvent('boys-9-10-empty', { number: '3', gender: 'M', min: 9, max: 10 });
+  const girlsNineTen = meetEvent('girls-9-10', { number: '4', gender: 'F', min: 9, max: 10 });
+
+  loadMeet(harness, {
+    events: [boysSevenEight, girlsSevenEightEmpty, boysNineTenEmpty, girlsNineTen],
+    entries: { [boysSevenEight.id]: 2, [girlsNineTen.id]: 2 },
+  });
+
+  const [suggestion] = harness.findSuggestedMergeTargets();
+  assert.deepEqual(opportunitySourceIds(suggestion), [boysSevenEight.id, girlsNineTen.id].sort());
+  assert.equal(suggestion.suggestedTarget.gender, 'X');
+  assert.equal(suggestion.suggestedTarget.ageMin, 7);
+  assert.equal(suggestion.suggestedTarget.ageMax, 10);
 });
 
 test('compatible sources become a merge opportunity only when the merge saves at least one heat', () => {
