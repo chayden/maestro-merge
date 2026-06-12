@@ -91,18 +91,24 @@ function heat(eventId, number = 1) {
   };
 }
 
-function record(eventId, index, laneCount) {
+function record(eventId, index, laneCount, overrides = {}) {
+  const {
+    gender,
+    seedTimeInt = 1000 + index,
+  } = overrides;
   const heatNumber = Math.floor(index / laneCount) + 1;
   const laneNumber = (index % laneCount) + 1;
+  const athleteId = gender ? `${eventId}-athlete-${index + 1}` : undefined;
   return {
     id: `${eventId}-record-${index + 1}`,
     attributes: {
       laneNumber,
-      seedTimeInt: 1000 + index,
+      seedTimeInt,
     },
     relationships: {
       event: { data: { id: eventId } },
       heat: { data: { id: `${eventId}-heat-${heatNumber}` } },
+      ...(athleteId ? { athlete: { data: { id: athleteId } } } : {}),
     },
   };
 }
@@ -124,6 +130,39 @@ function loadMeet(harness, { events, entries = {}, heatCounts = {}, laneCount = 
   });
 
   harness.setData({ events, records: allRecords, heats: allHeats, laneCount });
+}
+
+function genderedMeetRecords(eventId, laneCount, genders) {
+  const records = genders.map((gender, index) => record(eventId, index, laneCount, { gender }));
+  const athletes = genders.map((gender, index) => ({
+    id: `${eventId}-athlete-${index + 1}`,
+    attributes: { gender },
+  }));
+  return { records, athletes };
+}
+
+function seededGenderedMeetRecords(eventId, laneCount, entries) {
+  const records = entries.map((entry, index) => record(eventId, index, laneCount, {
+    gender: entry.gender,
+    seedTimeInt: entry.seedTimeInt,
+  }));
+  const athletes = entries.map((entry, index) => ({
+    id: `${eventId}-athlete-${index + 1}`,
+    attributes: {
+      gender: entry.gender,
+      displayFirstName: entry.name || `${entry.gender}${index + 1}`,
+    },
+  }));
+  return { records, athletes };
+}
+
+function chunkGenderCounts(chunk, athletes) {
+  const gendersByAthleteId = new Map(athletes.map(athlete => [athlete.id, athlete.attributes.gender]));
+  return chunk.records.reduce((counts, rec) => {
+    const gender = gendersByAthleteId.get(rec.relationships?.athlete?.data?.id) || 'O';
+    counts[gender] = (counts[gender] || 0) + 1;
+    return counts;
+  }, {});
 }
 
 function opportunitySourceIds(opportunity) {
@@ -183,6 +222,159 @@ test('heat sizing keeps smaller heats slow and avoids one or two swimmer heats w
   assert.deepEqual(harness.heatSizesForEntryCount(5, 4), [2, 3], 'a two-swimmer heat remains only when it cannot be avoided with the minimum heat count');
 });
 
+test('time organizer heat order can run slow-to-fast or fast-to-slow', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'mixed-target';
+  const records = Array.from({ length: 10 }, (_, index) => record(eventId, index, 4));
+
+  harness.setData({ records, laneCount: 4 });
+
+  assert.deepEqual(
+    harness.planTimeHeatChunks(records, 4, 'slowest-first').map(chunk => chunk.records.length),
+    [3, 3, 4],
+  );
+  assert.deepEqual(
+    harness.planTimeHeatChunks(records, 4, 'fastest-first').map(chunk => chunk.records.length),
+    [4, 3, 3],
+  );
+  assert.deepEqual(
+    harness.planTimeHeatChunks(records, 4, 'fastest-first')[0].records.map(rec => rec.id),
+    ['mixed-target-record-1', 'mixed-target-record-2', 'mixed-target-record-3', 'mixed-target-record-4'],
+  );
+});
+
+test('gender organizer fits 7 boys and 4 girls into two eight-lane heats', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'mixed-target';
+  const { records, athletes } = genderedMeetRecords(eventId, 8, [
+    'M', 'M', 'M', 'M', 'M', 'M', 'M',
+    'F', 'F', 'F', 'F',
+  ]);
+
+  harness.setData({ records, athletes, laneCount: 8 });
+
+  const slowFirstChunks = harness.planGenderHeatChunks(records, 8, 'slowest-first');
+  assert.deepEqual(slowFirstChunks.map(chunk => chunk.records.length), [6, 5]);
+  assert.deepEqual(chunkGenderCounts(slowFirstChunks[0], athletes), { F: 4, M: 2 });
+  assert.deepEqual(chunkGenderCounts(slowFirstChunks[1], athletes), { M: 5 });
+  assert.deepEqual(
+    slowFirstChunks[0].records.filter(rec => rec.id.includes('record-6') || rec.id.includes('record-7')).map(rec => rec.id).sort(),
+    ['mixed-target-record-6', 'mixed-target-record-7'],
+  );
+
+  const fastFirstChunks = harness.planGenderHeatChunks(records, 8, 'fastest-first');
+  assert.deepEqual(fastFirstChunks.map(chunk => chunk.records.length), [5, 6]);
+  assert.deepEqual(chunkGenderCounts(fastFirstChunks[0], athletes), { M: 5 });
+  assert.deepEqual(chunkGenderCounts(fastFirstChunks[1], athletes), { F: 4, M: 2 });
+});
+
+test('gender organizer uses normal time sorting when all swimmers share one gender', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'boys-target';
+  const { records, athletes } = genderedMeetRecords(eventId, 4, Array(10).fill('M'));
+
+  harness.setData({ records, athletes, laneCount: 4 });
+
+  const slowFirstChunks = harness.planGenderHeatChunks(records, 4, 'slowest-first');
+  assert.deepEqual(slowFirstChunks.map(chunk => chunk.records.length), [3, 3, 4]);
+  assert.deepEqual(
+    slowFirstChunks[2].records.map(rec => rec.id),
+    ['boys-target-record-4', 'boys-target-record-3', 'boys-target-record-2', 'boys-target-record-1'],
+  );
+
+  const fastFirstChunks = harness.planGenderHeatChunks(records, 4, 'fastest-first');
+  assert.deepEqual(fastFirstChunks.map(chunk => chunk.records.length), [4, 3, 3]);
+  assert.deepEqual(
+    fastFirstChunks[0].records.map(rec => rec.id),
+    ['boys-target-record-1', 'boys-target-record-2', 'boys-target-record-3', 'boys-target-record-4'],
+  );
+});
+
+test('gender organizer preserves fastest donor swimmers together after filling a mixed heat', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'mixed-target';
+  const { records, athletes } = genderedMeetRecords(eventId, 8, [
+    'M', 'M', 'M', 'M', 'M', 'M', 'M', 'M',
+    'M', 'M', 'M', 'M', 'M', 'M',
+    'F', 'F', 'F', 'F',
+  ]);
+
+  harness.setData({ records, athletes, laneCount: 8 });
+
+  const slowFirstChunks = harness.planGenderHeatChunks(records, 8, 'slowest-first');
+  assert.deepEqual(slowFirstChunks.map(chunk => chunk.records.length), [6, 4, 8]);
+  assert.deepEqual(chunkGenderCounts(slowFirstChunks[0], athletes), { F: 4, M: 2 });
+  assert.deepEqual(chunkGenderCounts(slowFirstChunks[1], athletes), { M: 4 });
+  assert.deepEqual(chunkGenderCounts(slowFirstChunks[2], athletes), { M: 8 });
+  assert.deepEqual(
+    slowFirstChunks[2].records.map(rec => rec.id),
+    [
+      'mixed-target-record-8',
+      'mixed-target-record-7',
+      'mixed-target-record-6',
+      'mixed-target-record-5',
+      'mixed-target-record-4',
+      'mixed-target-record-3',
+      'mixed-target-record-2',
+      'mixed-target-record-1',
+    ],
+  );
+
+  const fastFirstChunks = harness.planGenderHeatChunks(records, 8, 'fastest-first');
+  assert.deepEqual(fastFirstChunks.map(chunk => chunk.records.length), [8, 4, 6]);
+  assert.deepEqual(chunkGenderCounts(fastFirstChunks[0], athletes), { M: 8 });
+  assert.deepEqual(chunkGenderCounts(fastFirstChunks[2], athletes), { F: 4, M: 2 });
+});
+
+test('gender organizer places fastest boy and girl next to each other in mixed heats', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'mixed-target';
+  const { records, athletes } = genderedMeetRecords(eventId, 6, [
+    'F', 'F', 'F', 'F', 'M', 'F',
+  ]);
+
+  harness.setData({ records, athletes, laneCount: 6 });
+
+  const laneByRecordId = new Map(
+    harness.genderChunkLaneAssignments(records, 6)
+      .map(({ record, laneNumber }) => [record.id, laneNumber])
+  );
+
+  assert.equal(laneByRecordId.get('mixed-target-record-1'), 5, 'fastest girl gets the boundary lane on the girls side');
+  assert.equal(laneByRecordId.get('mixed-target-record-5'), 6, 'fastest boy gets the adjacent boundary lane on the boys side');
+  assert.equal(laneByRecordId.get('mixed-target-record-2'), 4, 'next girl moves outward on the girls side');
+  assert.equal(laneByRecordId.get('mixed-target-record-3'), 3);
+  assert.equal(laneByRecordId.get('mixed-target-record-4'), 2);
+  assert.equal(laneByRecordId.get('mixed-target-record-6'), 1);
+});
+
+test('gender organizer keeps faster girls closer to center than NT girls in a four-girl two-boy mixed heat', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'mixed-target';
+  const { records, athletes } = seededGenderedMeetRecords(eventId, 6, [
+    { gender: 'F', seedTimeInt: null, name: 'A Nt Girl' },
+    { gender: 'F', seedTimeInt: 5000, name: 'B Fifty Girl' },
+    { gender: 'F', seedTimeInt: 4900, name: 'C Forty Nine Girl' },
+    { gender: 'F', seedTimeInt: null, name: 'D Nt Girl' },
+    { gender: 'M', seedTimeInt: null, name: 'E Nt Boy' },
+    { gender: 'M', seedTimeInt: null, name: 'F Nt Boy' },
+  ]);
+
+  harness.setData({ records, athletes, laneCount: 6 });
+
+  const laneByRecordId = new Map(
+    harness.genderChunkLaneAssignments(records, 6)
+      .map(({ record, laneNumber }) => [record.id, laneNumber])
+  );
+
+  assert.equal(laneByRecordId.get('mixed-target-record-3'), 4, 'fastest girl gets the boundary lane on the girls side');
+  assert.equal(laneByRecordId.get('mixed-target-record-5'), 5, 'fastest boy gets the adjacent boundary lane on the boys side');
+  assert.equal(laneByRecordId.get('mixed-target-record-2'), 3, 'second-fastest girl is closer to the boundary than NT girls');
+  assert.equal(laneByRecordId.get('mixed-target-record-6'), 6, 'second boy stays on the boys side');
+  assert.equal(laneByRecordId.get('mixed-target-record-1'), 2);
+  assert.equal(laneByRecordId.get('mixed-target-record-4'), 1);
+});
+
 test('findOpportunities considers only letter-suffixed targets with at least two non-empty compatible sources', () => {
   const harness = loadMergeTestHarness();
   const boys = meetEvent('boys-7-8', { number: '1', gender: 'M', min: 7, max: 8 });
@@ -236,6 +428,8 @@ test('missing target suggestions describe the event metadata that would enable a
   assert.equal(suggestion.suggestedTarget.label, 'Mixed 7-8 25m Freestyle');
   assert.equal(suggestion.heatsSaved, 1);
   assert.equal(suggestion.canApply, false);
+  assert.equal(harness.ageGroupSpanForSourceEvents(suggestion.sourceEvents), 1);
+  assert.equal(harness.filterSuggestedMergeTargetsByAgeGroupLimit([suggestion], 1).length, 1);
 });
 
 test('missing target suggestions are suppressed when a compatible merge target already exists', () => {
@@ -251,6 +445,26 @@ test('missing target suggestions are suppressed when a compatible merge target a
 
   assert.equal(harness.findOpportunities().length, 1);
   assert.deepEqual(harness.findSuggestedMergeTargets(), []);
+});
+
+test('missing target suggestions are not suppressed by a broader compatible merge target', () => {
+  const harness = loadMergeTestHarness();
+  const boys = meetEvent('boys-7-8', { number: '1', gender: 'M', min: 7, max: 8 });
+  const girls = meetEvent('girls-7-8', { number: '2', gender: 'F', min: 7, max: 8 });
+  const broadTarget = meetEvent('mixed-10u-target', { number: '1A', gender: 'X', min: 0, max: 10 });
+
+  loadMeet(harness, {
+    events: [boys, girls, broadTarget],
+    entries: { [boys.id]: 2, [girls.id]: 2 },
+  });
+
+  assert.equal(harness.findOpportunities().length, 1);
+
+  const suggestions = harness.findSuggestedMergeTargets();
+  assert.equal(suggestions.length, 1);
+  assert.deepEqual(opportunitySourceIds(suggestions[0]), [boys.id, girls.id].sort());
+  assert.equal(suggestions[0].suggestedTarget.ageMin, 7);
+  assert.equal(suggestions[0].suggestedTarget.ageMax, 8);
 });
 
 test('missing target suggestions can coexist with real merge opportunities for other sources', () => {
@@ -302,6 +516,28 @@ test('missing target suggestions use current contiguous age and gender-balance r
   assert.equal(suggestion.suggestedTarget.gender, 'X');
   assert.equal(suggestion.suggestedTarget.ageMin, 7);
   assert.equal(suggestion.suggestedTarget.ageMax, 10);
+});
+
+test('missing target suggestions can be filtered by source age-group span', () => {
+  const harness = loadMergeTestHarness();
+  const sixUnder = meetEvent('boys-6u', { number: '1', gender: 'M', min: 0, max: 6 });
+  const sevenEightEmpty = meetEvent('boys-7-8-empty', { number: '2', gender: 'M', min: 7, max: 8 });
+  const nineTen = meetEvent('boys-9-10', { number: '3', gender: 'M', min: 9, max: 10 });
+
+  loadMeet(harness, {
+    events: [sixUnder, sevenEightEmpty, nineTen],
+    entries: { [sixUnder.id]: 2, [nineTen.id]: 2 },
+  });
+
+  const suggestions = harness.findSuggestedMergeTargets();
+  const bridgedSuggestion = suggestions.find(suggestion =>
+    opportunitySourceIds(suggestion).join('+') === [sixUnder.id, nineTen.id].sort().join('+')
+  );
+
+  assert.ok(bridgedSuggestion);
+  assert.equal(harness.ageGroupSpanForSourceEvents(bridgedSuggestion.sourceEvents), 3);
+  assert.equal(harness.filterSuggestedMergeTargetsByAgeGroupLimit([bridgedSuggestion], 2).length, 0);
+  assert.equal(harness.filterSuggestedMergeTargetsByAgeGroupLimit([bridgedSuggestion], 3).length, 1);
 });
 
 test('compatible sources become a merge opportunity only when the merge saves at least one heat', () => {

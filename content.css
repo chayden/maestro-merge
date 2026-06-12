@@ -190,6 +190,78 @@
   border-radius: 6px;
 }
 
+.mm-dashboard-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid #26384f;
+}
+
+.mm-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: #91a0b2;
+  padding: 8px 11px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mm-tab span {
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #1b2634;
+  color: #b9c8da;
+  font-size: 11px;
+  text-align: center;
+}
+
+.mm-tab:hover:not(.is-active) {
+  background: #121923;
+  color: #dce7f4;
+}
+
+.mm-tab.is-active {
+  background: #151a23;
+  border-color: #26384f;
+  color: #f2f7fc;
+  margin-bottom: -1px;
+  padding-bottom: 9px;
+}
+
+.mm-tab.is-active span {
+  background: #25577f;
+  color: #f5fbff;
+}
+
+.mm-proposed-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: #9aa8ba;
+  font-size: 11px;
+}
+
+.mm-proposed-filter label {
+  font-weight: 700;
+}
+
+.mm-proposed-age-limit {
+  border: 1px solid #31455f;
+  border-radius: 5px;
+  background: #0f151d;
+  color: #dce7f4;
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
 .mm-context-title,
 .mm-section-title {
   color: #e3e9f2;
@@ -667,6 +739,19 @@
   border-radius: 6px;
 }
 
+.mm-event-row.mm-event-populated-target {
+  margin: 6px -10px;
+  padding: 10px;
+  background: #182236;
+  border: 1px solid #315d91;
+  border-radius: 6px;
+}
+
+.mm-event-row.mm-event-needs-organization.mm-event-populated-target {
+  background: #162b2d;
+  border-color: #2f7c71;
+}
+
 .mm-event-row strong {
   display: block;
   color: #e3e9f2;
@@ -681,6 +766,7 @@
   margin-top: 2px;
 }
 
+.mm-event-row .mm-event-row-label,
 .mm-event-row .mm-needs-organization-label {
   display: inline-block;
   width: fit-content;
@@ -693,6 +779,11 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.3px;
+}
+
+.mm-event-row .mm-populated-target-label {
+  background: #1e4a78;
+  color: #a9d8ff;
 }
 
 .mm-event-row-counts {
@@ -846,14 +937,14 @@
   border-top: 1px solid #26384f;
 }
 
-.mm-organizer-actions div {
+.mm-organizer-actions > div {
   display: grid;
   grid-template-columns: 190px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
 }
 
-.mm-organizer-actions span {
+.mm-organizer-actions > div > span {
   color: #8190a3;
   font-size: 11px;
   line-height: 1.35;
