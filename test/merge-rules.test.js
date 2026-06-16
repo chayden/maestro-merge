@@ -243,6 +243,237 @@ test('time organizer heat order can run slow-to-fast or fast-to-slow', () => {
   );
 });
 
+test('age-group organizer uses the minimum heat count without splitting age groups unnecessarily', () => {
+  const harness = loadMergeTestHarness();
+  const sixUnder = meetEvent('six-under', { number: '1', gender: 'M', min: 0, max: 6 });
+  const sevenEight = meetEvent('seven-eight', { number: '2', gender: 'M', min: 7, max: 8 });
+  const records = [
+    ...Array.from({ length: 3 }, (_, index) => record(sixUnder.id, index, 4)),
+    ...Array.from({ length: 3 }, (_, index) => record(sevenEight.id, index, 4)),
+  ];
+
+  harness.setData({ events: [sixUnder, sevenEight], records, laneCount: 4 });
+
+  const chunks = harness.planAgeGroupHeatChunks(records, 4, 'slowest-first');
+  assert.deepEqual(chunks.map(chunk => chunk.records.length), [3, 3]);
+  assert.deepEqual(
+    chunks.map(chunk => [...new Set(chunk.records.map(rec => rec.relationships.event.data.id))]),
+    [[sixUnder.id], [sevenEight.id]],
+  );
+});
+
+test('age-group organizer combines whole age groups when they fit the minimum heat count', () => {
+  const harness = loadMergeTestHarness();
+  const sixUnder = meetEvent('six-under', { number: '1', gender: 'M', min: 0, max: 6 });
+  const sevenEight = meetEvent('seven-eight', { number: '2', gender: 'M', min: 7, max: 8 });
+  const nineTen = meetEvent('nine-ten', { number: '3', gender: 'M', min: 9, max: 10 });
+  const records = [sixUnder, sevenEight, nineTen].flatMap(evt =>
+    Array.from({ length: 2 }, (_, index) => record(evt.id, index, 4))
+  );
+
+  harness.setData({ events: [sixUnder, sevenEight, nineTen], records, laneCount: 4 });
+
+  const chunks = harness.planAgeGroupHeatChunks(records, 4, 'slowest-first');
+  assert.deepEqual(chunks.map(chunk => chunk.records.length), [2, 4]);
+  assert.deepEqual(
+    chunks.map(chunk => [...new Set(chunk.records.map(rec => rec.relationships.event.data.id))]),
+    [[sixUnder.id], [sevenEight.id, nineTen.id]],
+  );
+});
+
+test('age-group labels use source event groups and can infer merged target records from athlete age', () => {
+  const harness = loadMergeTestHarness();
+  const sevenEight = meetEvent('seven-eight', { number: '2', gender: 'M', min: 7, max: 8 });
+  const target = meetEvent('mixed-target', { number: '2A', gender: 'X', min: 0, max: 10 });
+  const sourceRecord = record(sevenEight.id, 0, 4);
+  const targetRecord = record(target.id, 0, 4, { gender: 'M' });
+  const athletes = [{
+    id: targetRecord.relationships.athlete.data.id,
+    attributes: { gender: 'M', age: 7 },
+  }];
+
+  harness.setData({ events: [sevenEight, target], records: [sourceRecord, targetRecord], athletes, laneCount: 4 });
+
+  assert.equal(harness.originalAgeGroupTileLabel(sourceRecord, sevenEight.id), '7-8');
+  assert.equal(harness.originalAgeGroupTileLabel(targetRecord, target.id), '7-8');
+});
+
+test('original age-group cache record keys include the meet id', () => {
+  const harness = loadMergeTestHarness();
+
+  assert.equal(harness.originalAgeGroupRecordKey('target-event', 'athlete-1'), '1:target-event:athlete-1');
+});
+
+test('lane insertion shifts swimmers toward the side the dragged swimmer came from', () => {
+  const harness = loadMergeTestHarness();
+  const event = meetEvent('target', { number: '2A', gender: 'X', min: 0, max: 10 });
+  const records = Array.from({ length: 4 }, (_, index) => record(event.id, index, 6));
+
+  harness.setData({ events: [event], records, heats: [heat(event.id, 1)], laneCount: 6 });
+
+  const plan = harness.buildLaneInsertAssignments(event.id, records[1], {
+    heatId: `${event.id}-heat-1`,
+    leftLane: 4,
+    rightLane: 5,
+  });
+
+  assert.deepEqual(
+    plan.assignments.map(({ record: rec, laneNumber }) => [rec.id, laneNumber]),
+    [
+      [`${event.id}-record-3`, 2],
+      [`${event.id}-record-4`, 3],
+      [`${event.id}-record-2`, 4],
+    ],
+  );
+});
+
+test('lane insertion shifts right when the dragged swimmer came from the right', () => {
+  const harness = loadMergeTestHarness();
+  const event = meetEvent('target', { number: '2A', gender: 'X', min: 0, max: 10 });
+  const records = Array.from({ length: 6 }, (_, index) => record(event.id, index, 6));
+
+  harness.setData({ events: [event], records, heats: [heat(event.id, 1)], laneCount: 6 });
+
+  const plan = harness.buildLaneInsertAssignments(event.id, records[5], {
+    heatId: `${event.id}-heat-1`,
+    leftLane: 2,
+    rightLane: 3,
+  });
+
+  assert.deepEqual(
+    plan.assignments.map(({ record: rec, laneNumber }) => [rec.id, laneNumber]),
+    [
+      [`${event.id}-record-5`, 6],
+      [`${event.id}-record-4`, 5],
+      [`${event.id}-record-3`, 4],
+      [`${event.id}-record-6`, 3],
+    ],
+  );
+});
+
+test('lane insertion from the same lane in another heat picks the side with room', () => {
+  const harness = loadMergeTestHarness();
+  const event = meetEvent('target', { number: '2A', gender: 'X', min: 0, max: 10 });
+  const records = [
+    record(event.id, 0, 4),
+    record(event.id, 1, 4),
+    record(event.id, 2, 4),
+    record(event.id, 5, 4),
+  ];
+
+  harness.setData({ events: [event], records, heats: [heat(event.id, 1), heat(event.id, 2)], laneCount: 4 });
+
+  const plan = harness.buildLaneInsertAssignments(event.id, records[3], {
+    heatId: `${event.id}-heat-1`,
+    leftLane: 2,
+    rightLane: 3,
+  });
+
+  assert.deepEqual(
+    plan.assignments.map(({ record: rec, laneNumber }) => [rec.id, laneNumber]),
+    [
+      [`${event.id}-record-3`, 4],
+      [`${event.id}-record-6`, 3],
+    ],
+  );
+});
+
+test('lane insertion direction follows pointer side when both shifts are possible', () => {
+  const harness = loadMergeTestHarness();
+  const event = meetEvent('target', { number: '2A', gender: 'X', min: 0, max: 10 });
+  const records = [
+    record(event.id, 1, 6),
+    record(event.id, 2, 6),
+    record(event.id, 3, 6),
+    record(event.id, 7, 6),
+  ];
+  const boundary = {
+    heatId: `${event.id}-heat-1`,
+    leftLane: 3,
+    rightLane: 4,
+    indicatorX: 100,
+  };
+
+  harness.setData({ events: [event], records, heats: [heat(event.id, 1), heat(event.id, 2)], laneCount: 6 });
+
+  const leftPlan = harness.chooseLaneInsertPlan(event.id, records[3], boundary, 96);
+  const rightPlan = harness.chooseLaneInsertPlan(event.id, records[3], boundary, 104);
+
+  assert.equal(leftPlan.direction, 'left');
+  assert.deepEqual(
+    leftPlan.assignments.map(({ record: rec, laneNumber }) => [rec.id, laneNumber]),
+    [
+      [`${event.id}-record-2`, 1],
+      [`${event.id}-record-3`, 2],
+      [`${event.id}-record-8`, 3],
+    ],
+  );
+  assert.equal(rightPlan.direction, 'right');
+  assert.deepEqual(
+    rightPlan.assignments.map(({ record: rec, laneNumber }) => [rec.id, laneNumber]),
+    [
+      [`${event.id}-record-4`, 5],
+      [`${event.id}-record-8`, 4],
+    ],
+  );
+});
+
+test('lane insertion supports the left edge of the first lane', () => {
+  const harness = loadMergeTestHarness();
+  const event = meetEvent('target', { number: '2A', gender: 'X', min: 0, max: 10 });
+  const records = [
+    record(event.id, 0, 4),
+    record(event.id, 1, 4),
+    record(event.id, 3, 4),
+  ];
+
+  harness.setData({ events: [event], records, heats: [heat(event.id, 1)], laneCount: 4 });
+
+  const plan = harness.buildLaneInsertAssignments(event.id, records[2], {
+    heatId: `${event.id}-heat-1`,
+    leftLane: 0,
+    rightLane: 1,
+  });
+
+  assert.equal(plan.direction, 'right');
+  assert.deepEqual(
+    plan.assignments.map(({ record: rec, laneNumber }) => [rec.id, laneNumber]),
+    [
+      [`${event.id}-record-2`, 3],
+      [`${event.id}-record-1`, 2],
+      [`${event.id}-record-4`, 1],
+    ],
+  );
+});
+
+test('lane insertion supports the right edge of the last lane', () => {
+  const harness = loadMergeTestHarness();
+  const event = meetEvent('target', { number: '2A', gender: 'X', min: 0, max: 10 });
+  const records = [
+    record(event.id, 0, 4),
+    record(event.id, 2, 4),
+    record(event.id, 3, 4),
+  ];
+
+  harness.setData({ events: [event], records, heats: [heat(event.id, 1)], laneCount: 4 });
+
+  const plan = harness.buildLaneInsertAssignments(event.id, records[0], {
+    heatId: `${event.id}-heat-1`,
+    leftLane: 4,
+    rightLane: 5,
+  });
+
+  assert.equal(plan.direction, 'left');
+  assert.deepEqual(
+    plan.assignments.map(({ record: rec, laneNumber }) => [rec.id, laneNumber]),
+    [
+      [`${event.id}-record-3`, 2],
+      [`${event.id}-record-4`, 3],
+      [`${event.id}-record-1`, 4],
+    ],
+  );
+});
+
 test('gender organizer fits 7 boys and 4 girls into two eight-lane heats', () => {
   const harness = loadMergeTestHarness();
   const eventId = 'mixed-target';
