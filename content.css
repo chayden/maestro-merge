@@ -848,6 +848,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
   color: #9aa8ba;
   font-size: 11px;
@@ -856,9 +857,10 @@
 .mm-segmented {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   border: 1px solid #31455f;
   border-radius: 5px;
-  overflow: hidden;
+  overflow: clip;
   background: #121923;
 }
 
@@ -871,6 +873,7 @@
   font-size: 11px;
   font-weight: 700;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .mm-segmented-btn:last-child {
@@ -978,6 +981,7 @@
   display: grid;
   gap: 6px;
   min-width: 0;
+  position: relative;
 }
 
 .mm-lane-slot {
@@ -1001,6 +1005,79 @@
 .mm-drop-target {
   border-color: #7bb3ff;
   background: #172438;
+}
+
+.mm-swap-target,
+.mm-swap-source {
+  position: relative;
+}
+
+.mm-swap-target::after,
+.mm-swap-source::after {
+  content: 'Swap';
+  position: absolute;
+  top: -8px;
+  left: 50%;
+  min-width: 44px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #f8d66d;
+  color: #17202b;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 24px;
+  text-align: center;
+  text-transform: uppercase;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.mm-insert-indicator {
+  position: absolute;
+  top: -5px;
+  bottom: -5px;
+  width: 4px;
+  border-radius: 999px;
+  background: #f8d66d;
+  box-shadow: 0 0 0 2px rgba(248, 214, 109, 0.2), 0 0 12px rgba(248, 214, 109, 0.55);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%);
+  transition: opacity 0.12s;
+  z-index: 2;
+}
+
+.mm-insert-indicator::after {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  min-width: 28px;
+  height: 24px;
+  border-radius: 999px;
+  background: #f8d66d;
+  color: #17202b;
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 22px;
+  text-align: center;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+}
+
+.mm-insert-indicator[data-shift-direction="left"]::after {
+  content: '\2190';
+}
+
+.mm-insert-indicator[data-shift-direction="right"]::after {
+  content: '\2192';
+}
+
+.mm-insert-indicator.is-active {
+  opacity: 1;
 }
 
 .mm-saving {

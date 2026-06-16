@@ -30,9 +30,11 @@
   let operationDepth = 0;
   let organizerLabelMode = 'initials';
   let organizerHeatOrder = 'slowest-first';
+  let organizerDragRecordId = null;
   let proposedMergeAgeGroupLimit = 2;
   const meetMaestroRefreshReadDelayMs = 250;
   const reloadRestoreKey = 'mmMergeHelperRestoreAfterReload';
+  const originalAgeGroupStoragePrefix = 'mmMergeHelperOriginalAgeGroups:v1';
 
   // ---- Auth & meet ID detection ----
 
@@ -464,6 +466,7 @@
     if (organizerLabelMode === 'event-rank') return String(ranks.event.get(record.id) || '?');
     if (organizerLabelMode === 'team-rank') return String(ranks.team.get(record.id) || '?');
     if (organizerLabelMode === 'sex-rank') return String(ranks.sex.get(record.id) || '?');
+    if (organizerLabelMode === 'age-group') return originalAgeGroupTileLabel(record, eventId);
     return athleteInitials(record);
   }
 
@@ -515,6 +518,13 @@
 
   function athleteGender(record) {
     return (athleteFor(record)?.attributes?.gender || '').toUpperCase();
+  }
+
+  function athleteAge(record) {
+    const attrs = athleteFor(record)?.attributes || {};
+    const age = attrs.age ?? attrs.meetAge ?? attrs.swimmerAge ?? attrs.athleteAge ?? attrs.ageOnMeetDate ?? attrs.competitionAge;
+    const value = Number(age);
+    return Number.isInteger(value) && value >= 0 ? value : null;
   }
 
   function requireLaneCount() {
@@ -685,6 +695,197 @@
     const chunks = nonDonorChunks.concat(donorChunks);
 
     return heatOrder === 'fastest-first' ? chunks.reverse() : chunks;
+  }
+
+  function ageGroupInfoForEvent(evt) {
+    if (!evt) return null;
+    const min = eventAgeMin(evt);
+    const max = eventAgeMax(evt);
+    const label = evt.attributes?.ageGroupName || eventNodeFor(evt.id)?.attributes?.ageGroupName || targetAgeLabel(min, max);
+    return {
+      key: evt.id,
+      label,
+      shortLabel: shortAgeGroupLabel(min, max, label),
+      sortMin: Number.isFinite(Number(min)) ? Number(min) : Number.MAX_SAFE_INTEGER,
+      sortMax: Number.isFinite(Number(max)) ? Number(max) : Number.MAX_SAFE_INTEGER,
+      eventSort: eventSortValue(evt) ?? Number.MAX_SAFE_INTEGER,
+    };
+  }
+
+  function shortAgeGroupLabel(min, max, label) {
+    const minAge = Number(min);
+    const maxAge = Number(max);
+    if (Number.isFinite(minAge) && Number.isFinite(maxAge)) {
+      if (minAge <= 0) return `${maxAge}U`;
+      if (minAge === maxAge) return String(minAge);
+      return `${minAge}-${maxAge}`;
+    }
+    return String(label || '?')
+      .replace(/\s*&\s*Under/i, 'U')
+      .replace(/\s+/g, '');
+  }
+
+  function originalAgeGroupStorageKey() {
+    return `${originalAgeGroupStoragePrefix}:${meetId || 'unknown-meet'}:${sessionId || 'unknown-session'}`;
+  }
+
+  function readOriginalAgeGroupStore() {
+    try {
+      const raw = window.localStorage?.getItem(originalAgeGroupStorageKey());
+      return raw ? JSON.parse(raw) : {};
+    } catch (err) {
+      console.debug('[Merge Helper] original age-group store read failed:', err);
+      return {};
+    }
+  }
+
+  function writeOriginalAgeGroupStore(store) {
+    try {
+      window.localStorage?.setItem(originalAgeGroupStorageKey(), JSON.stringify(store));
+    } catch (err) {
+      console.debug('[Merge Helper] original age-group store write failed:', err);
+    }
+  }
+
+  function recordAthleteId(record) {
+    return record.relationships?.athlete?.data?.id || null;
+  }
+
+  function originalAgeGroupRecordKey(eventId, athleteId) {
+    if (!eventId || !athleteId) return null;
+    return `${meetId || 'unknown-meet'}:${eventId}:${athleteId}`;
+  }
+
+  function legacyOriginalAgeGroupRecordKey(eventId, athleteId) {
+    if (!eventId || !athleteId) return null;
+    return `${eventId}:${athleteId}`;
+  }
+
+  function storedOriginalAgeGroupInfo(record, eventId) {
+    const athleteId = recordAthleteId(record);
+    if (!athleteId || !eventId) return null;
+    const store = readOriginalAgeGroupStore();
+    const stored = store[originalAgeGroupRecordKey(eventId, athleteId)] || store[legacyOriginalAgeGroupRecordKey(eventId, athleteId)];
+    if (!stored) return null;
+    return {
+      key: stored.eventId || stored.key || `${eventId}:${athleteId}`,
+      label: stored.label || '?',
+      shortLabel: stored.shortLabel || shortAgeGroupLabel(stored.min, stored.max, stored.label),
+      sortMin: Number.isFinite(Number(stored.min)) ? Number(stored.min) : Number.MAX_SAFE_INTEGER,
+      sortMax: Number.isFinite(Number(stored.max)) ? Number(stored.max) : Number.MAX_SAFE_INTEGER,
+      eventSort: Number.isFinite(Number(stored.eventSort)) ? Number(stored.eventSort) : Number.MAX_SAFE_INTEGER,
+    };
+  }
+
+  function sourceEventForAthleteAge(record, targetEvent) {
+    const age = athleteAge(record);
+    if (age === null || !targetEvent) return null;
+    const gender = athleteGender(record);
+
+    return allEvents
+      .filter(evt => !isMergeTarget(evt))
+      .filter(evt => isSourceCompatibleWithTarget(evt, targetEvent))
+      .filter(evt => Number(eventAgeMin(evt)) <= age && age <= Number(eventAgeMax(evt)))
+      .filter(evt => {
+        const eventSex = eventGender(evt);
+        return !gender || eventSex === gender || eventSex === 'X';
+      })
+      .sort((a, b) => {
+        const spanDiff = (Number(eventAgeMax(a)) - Number(eventAgeMin(a))) - (Number(eventAgeMax(b)) - Number(eventAgeMin(b)));
+        if (spanDiff !== 0) return spanDiff;
+        return compareAgeThenEventOrder(a, b);
+      })[0] || null;
+  }
+
+  function originalAgeGroupInfo(record, eventId = record.relationships?.event?.data?.id) {
+    const currentEventId = record.relationships?.event?.data?.id;
+    const currentEvent = allEvents.find(evt => evt.id === currentEventId) || allEvents.find(evt => evt.id === eventId);
+    if (currentEvent && !isMergeTarget(currentEvent)) return ageGroupInfoForEvent(currentEvent);
+
+    const stored = storedOriginalAgeGroupInfo(record, eventId || currentEventId);
+    if (stored) return stored;
+
+    const inferredSource = sourceEventForAthleteAge(record, currentEvent);
+    if (inferredSource) return ageGroupInfoForEvent(inferredSource);
+
+    return ageGroupInfoForEvent(currentEvent) || {
+      key: 'unknown',
+      label: '?',
+      shortLabel: '?',
+      sortMin: Number.MAX_SAFE_INTEGER,
+      sortMax: Number.MAX_SAFE_INTEGER,
+      eventSort: Number.MAX_SAFE_INTEGER,
+    };
+  }
+
+  function originalAgeGroupTileLabel(record, eventId) {
+    return originalAgeGroupInfo(record, eventId)?.shortLabel || '?';
+  }
+
+  function compareAgeGroupInfos(a, b) {
+    if (a.sortMin !== b.sortMin) return a.sortMin - b.sortMin;
+    if (a.sortMax !== b.sortMax) return a.sortMax - b.sortMax;
+    if (a.eventSort !== b.eventSort) return a.eventSort - b.eventSort;
+    return String(a.label).localeCompare(String(b.label));
+  }
+
+  function ageGroupBoundarySplitCost(entries, boundaryIndex) {
+    if (boundaryIndex <= 0 || boundaryIndex >= entries.length) return 0;
+    return entries[boundaryIndex - 1].groupKey === entries[boundaryIndex].groupKey ? 1000 : 0;
+  }
+
+  function partitionAgeGroupEntries(entries, heatCount, laneTotal, heatOrder) {
+    const idealSizes = heatSizesForOrder(entries.length, laneTotal, heatOrder);
+    const memo = new Map();
+
+    function bestFrom(index, heatIndex) {
+      const remainingHeats = heatCount - heatIndex;
+      const remainingRecords = entries.length - index;
+      if (remainingHeats === 0) return remainingRecords === 0 ? { cost: 0, sizes: [] } : null;
+      if (remainingRecords < remainingHeats || remainingRecords > remainingHeats * laneTotal) return null;
+
+      const key = `${index}:${heatIndex}`;
+      if (memo.has(key)) return memo.get(key);
+
+      let best = null;
+      const minSize = Math.max(1, remainingRecords - (remainingHeats - 1) * laneTotal);
+      const maxSize = Math.min(laneTotal, remainingRecords - (remainingHeats - 1));
+      for (let size = minSize; size <= maxSize; size++) {
+        const nextIndex = index + size;
+        const rest = bestFrom(nextIndex, heatIndex + 1);
+        if (!rest) continue;
+        const splitCost = ageGroupBoundarySplitCost(entries, nextIndex);
+        const sizeCost = Math.abs(size - (idealSizes[heatIndex] || size));
+        const candidate = {
+          cost: splitCost + sizeCost + rest.cost,
+          sizes: [size, ...rest.sizes],
+        };
+        if (!best || candidate.cost < best.cost) best = candidate;
+      }
+
+      memo.set(key, best);
+      return best;
+    }
+
+    return bestFrom(0, 0)?.sizes || idealSizes;
+  }
+
+  function planAgeGroupHeatChunks(records, laneTotal = requireLaneCount(), heatOrder = organizerHeatOrder, eventId = null) {
+    const entries = records
+      .map(record => {
+        const info = originalAgeGroupInfo(record, eventId || record.relationships?.event?.data?.id);
+        return {
+          record,
+          info,
+          groupKey: info.key,
+        };
+      })
+      .sort((a, b) => compareAgeGroupInfos(a.info, b.info) || compareSlowestFirst(a.record, b.record));
+
+    const heatCount = heatSizesForEntryCount(entries.length, laneTotal).length;
+    const sizes = partitionAgeGroupEntries(entries, heatCount, laneTotal, heatOrder);
+    return chunkRecordsByHeatSize(entries, sizes)
+      .map(chunkEntries => ({ records: chunkEntries.map(entry => entry.record) }));
   }
 
   function genderChunkLaneAssignments(records, laneTotal = requireLaneCount()) {
@@ -1396,8 +1597,13 @@
       filterSuggestedMergeTargetsByAgeGroupLimit,
       ageGroupSpanForSourceEvents,
       generateSourceSelections,
+      buildLaneInsertAssignments,
+      chooseLaneInsertPlan,
       heatSizesForEntryCount,
       laneSeedOrder,
+      originalAgeGroupRecordKey,
+      originalAgeGroupTileLabel,
+      planAgeGroupHeatChunks,
       planGenderHeatChunks,
       planTimeHeatChunks,
       genderChunkLaneAssignments,
@@ -1863,6 +2069,7 @@
             <button class="mm-segmented-btn ${organizerLabelMode === 'event-rank' ? 'is-active' : ''}" data-label-mode="event-rank">Event Rank</button>
             <button class="mm-segmented-btn ${organizerLabelMode === 'team-rank' ? 'is-active' : ''}" data-label-mode="team-rank">Team Rank</button>
             <button class="mm-segmented-btn ${organizerLabelMode === 'sex-rank' ? 'is-active' : ''}" data-label-mode="sex-rank">Sex Rank</button>
+            <button class="mm-segmented-btn ${organizerLabelMode === 'age-group' ? 'is-active' : ''}" data-label-mode="age-group">Age Group</button>
           </div>
         </div>
         ${renderTeamLegend(records)}
@@ -1884,6 +2091,10 @@
             <span>Use the selected heat order and fewest heats possible, then keep heats single-gender where possible. Mixed heats put girls on low lanes and boys on high lanes.</span>
           </div>
           <div>
+            <button class="mm-btn mm-btn-secondary mm-group-age">Group Age Groups</button>
+            <span>Use the fewest heats possible while keeping original age groups together when the lane count allows it.</span>
+          </div>
+          <div>
             <button class="mm-btn mm-btn-reload mm-page-reload">Reload Page</button>
             <span>Some saved changes may not be reflected in Meet Maestro until the page is reloaded.</span>
           </div>
@@ -1895,6 +2106,7 @@
     el.querySelector('.mm-sort-time')?.addEventListener('click', event => organizeByTime(eventId, event.currentTarget));
     el.querySelector('.mm-page-reload')?.addEventListener('click', () => requestPageReload());
     el.querySelector('.mm-group-gender')?.addEventListener('click', event => organizeByGender(eventId, event.currentTarget));
+    el.querySelector('.mm-group-age')?.addEventListener('click', event => organizeByAgeGroup(eventId, event.currentTarget));
     el.querySelectorAll('.mm-segmented-btn').forEach(button => {
       button.addEventListener('click', () => {
         if (button.dataset.labelMode) organizerLabelMode = button.dataset.labelMode;
@@ -1919,7 +2131,8 @@
     const team = recordTeamAbbreviation(record);
     const teamColor = teamColorFor(record);
     const time = recordSeedTime(record);
-    const title = `${name}${team ? ` (${team})` : ''}\nSeed: ${time}\nHeat ${heatNumber}, Lane ${lane}`;
+    const ageGroup = originalAgeGroupInfo(record, eventId)?.label;
+    const title = `${name}${team ? ` (${team})` : ''}\nSeed: ${time}${ageGroup ? `\nAge group: ${ageGroup}` : ''}\nHeat ${heatNumber}, Lane ${lane}`;
     const primaryLabel = organizerPrimaryLabel(record, eventId, ranks);
 
     return `<div class="mm-lane-slot" data-heat-id="${esc(heatId)}" data-heat-number="${esc(heatNumber)}" data-lane="${lane}" data-record-id="${esc(record.id)}">
@@ -1940,26 +2153,203 @@
         }
         event.dataTransfer.effectAllowed = 'move';
         event.dataTransfer.setData('text/plain', tile.dataset.recordId);
+        organizerDragRecordId = tile.dataset.recordId;
         tile.classList.add('mm-dragging');
       });
-      tile.addEventListener('dragend', () => tile.classList.remove('mm-dragging'));
+      tile.addEventListener('dragend', () => {
+        organizerDragRecordId = null;
+        tile.classList.remove('mm-dragging');
+        clearOrganizerDropFeedback(root);
+      });
+    });
+
+    root.querySelectorAll('.mm-heat-lanes').forEach(lanesEl => {
+      lanesEl.addEventListener('dragover', event => {
+        if (isOperationInFlight()) return;
+        const sourceRecordId = organizerDragRecordId || event.dataTransfer.getData('text/plain');
+        const sourceRecord = allRecords.find(record => record.id === sourceRecordId);
+        const boundary = insertBoundaryFromDragEvent(lanesEl, event);
+        const insertPlan = boundary && sourceRecord
+          ? chooseLaneInsertPlan(eventId, sourceRecord, boundary, event.clientX)
+          : null;
+        if (!boundary) {
+          clearInsertIndicator(lanesEl);
+          return;
+        }
+        if (!insertPlan) {
+          clearInsertIndicator(lanesEl);
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        clearLaneDropTargets(root);
+        showInsertIndicator(lanesEl, { ...boundary, shiftDirection: insertPlan.direction });
+      }, true);
+
+      lanesEl.addEventListener('dragleave', event => {
+        if (event.relatedTarget && lanesEl.contains(event.relatedTarget)) return;
+        clearInsertIndicator(lanesEl);
+      });
+
+      lanesEl.addEventListener('drop', async event => {
+        if (isOperationInFlight()) return;
+        const sourceRecordId = organizerDragRecordId || event.dataTransfer.getData('text/plain');
+        const sourceRecord = allRecords.find(record => record.id === sourceRecordId);
+        const boundary = insertBoundaryFromDragEvent(lanesEl, event);
+        const insertPlan = boundary && sourceRecord
+          ? chooseLaneInsertPlan(eventId, sourceRecord, boundary, event.clientX)
+          : null;
+        if (!boundary || !insertPlan) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        clearOrganizerDropFeedback(root);
+        organizerDragRecordId = null;
+        await insertRecordBetweenOrganizerLanes(eventId, sourceRecord.id, { ...boundary, shiftDirection: insertPlan.direction });
+      }, true);
     });
 
     root.querySelectorAll('.mm-lane-slot').forEach(slot => {
       slot.addEventListener('dragover', event => {
         if (isOperationInFlight()) return;
         event.preventDefault();
+        const sourceRecordId = organizerDragRecordId || event.dataTransfer.getData('text/plain');
+        const targetRecordId = slot.dataset.recordId;
+        root.querySelectorAll('.mm-swap-target, .mm-swap-source').forEach(swapSlot => {
+          if (swapSlot !== slot) swapSlot.classList.remove('mm-swap-target');
+          swapSlot.classList.remove('mm-swap-source');
+        });
         slot.classList.add('mm-drop-target');
+        if (targetRecordId && targetRecordId !== sourceRecordId) {
+          slot.classList.add('mm-swap-target');
+          root.querySelector(`.mm-lane-slot[data-record-id="${CSS.escape(sourceRecordId)}"]`)?.classList.add('mm-swap-source');
+        } else {
+          slot.classList.remove('mm-swap-target');
+        }
       });
-      slot.addEventListener('dragleave', () => slot.classList.remove('mm-drop-target'));
+      slot.addEventListener('dragleave', () => {
+        slot.classList.remove('mm-drop-target');
+        slot.classList.remove('mm-swap-target');
+        root.querySelectorAll('.mm-swap-source').forEach(sourceSlot => sourceSlot.classList.remove('mm-swap-source'));
+      });
       slot.addEventListener('drop', async event => {
         event.preventDefault();
         slot.classList.remove('mm-drop-target');
+        slot.classList.remove('mm-swap-target');
+        root.querySelectorAll('.mm-swap-source').forEach(sourceSlot => sourceSlot.classList.remove('mm-swap-source'));
         if (isOperationInFlight()) return;
-        const sourceRecordId = event.dataTransfer.getData('text/plain');
+        const sourceRecordId = organizerDragRecordId || event.dataTransfer.getData('text/plain');
+        organizerDragRecordId = null;
         await moveRecordWithinOrganizer(eventId, sourceRecordId, slot);
       });
     });
+  }
+
+  function clearLaneDropTargets(root) {
+    root.querySelectorAll('.mm-drop-target').forEach(slot => slot.classList.remove('mm-drop-target'));
+    root.querySelectorAll('.mm-swap-target').forEach(slot => slot.classList.remove('mm-swap-target'));
+    root.querySelectorAll('.mm-swap-source').forEach(slot => slot.classList.remove('mm-swap-source'));
+  }
+
+  function clearOrganizerDropFeedback(root) {
+    clearLaneDropTargets(root);
+    root.querySelectorAll('.mm-heat-lanes').forEach(clearInsertIndicator);
+  }
+
+  function insertBoundaryFromDragEvent(lanesEl, event) {
+    const slots = Array.from(lanesEl.querySelectorAll('.mm-lane-slot'))
+      .sort((a, b) => Number(a.dataset.lane) - Number(b.dataset.lane));
+    if (slots.length === 0) return null;
+
+    const rowRect = lanesEl.getBoundingClientRect();
+    if (event.clientY < rowRect.top - 8 || event.clientY > rowRect.bottom + 8) return null;
+
+    let best = null;
+    const considerBoundary = boundary => {
+      const distance = Math.abs(event.clientX - boundary.indicatorX);
+      if (distance > boundary.threshold || (best && distance >= best.distance)) return;
+      best = {
+        distance,
+        heatId: boundary.heatId,
+        heatNumber: boundary.heatNumber,
+        indicatorX: boundary.indicatorX,
+        leftLane: boundary.leftLane,
+        rightLane: boundary.rightLane,
+      };
+    };
+
+    const first = slots[0];
+    const firstRect = first.getBoundingClientRect();
+    considerBoundary({
+      indicatorX: firstRect.left,
+      threshold: 12,
+      heatId: first.dataset.heatId,
+      heatNumber: Number(first.dataset.heatNumber),
+      leftLane: Number(first.dataset.lane) - 1,
+      rightLane: Number(first.dataset.lane),
+    });
+
+    for (let index = 0; index < slots.length - 1; index++) {
+      const left = slots[index];
+      const right = slots[index + 1];
+      const leftRect = left.getBoundingClientRect();
+      const rightRect = right.getBoundingClientRect();
+      const center = (leftRect.right + rightRect.left) / 2;
+      const gap = Math.max(0, rightRect.left - leftRect.right);
+      const threshold = Math.max(10, gap / 2 + 8);
+      considerBoundary({
+        indicatorX: center,
+        heatId: left.dataset.heatId,
+        heatNumber: Number(left.dataset.heatNumber),
+        leftLane: Number(left.dataset.lane),
+        rightLane: Number(right.dataset.lane),
+        threshold,
+      });
+    }
+
+    const last = slots[slots.length - 1];
+    const lastRect = last.getBoundingClientRect();
+    considerBoundary({
+      indicatorX: lastRect.right,
+      threshold: 12,
+      heatId: last.dataset.heatId,
+      heatNumber: Number(last.dataset.heatNumber),
+      leftLane: Number(last.dataset.lane),
+      rightLane: Number(last.dataset.lane) + 1,
+    });
+
+    if (!best || best.rightLane !== best.leftLane + 1) return null;
+    return best;
+  }
+
+  function showInsertIndicator(lanesEl, boundary) {
+    let indicator = lanesEl.querySelector('.mm-insert-indicator');
+    if (!indicator) {
+      indicator = document.createElement('div');
+      indicator.className = 'mm-insert-indicator';
+      lanesEl.appendChild(indicator);
+    }
+
+    const rowRect = lanesEl.getBoundingClientRect();
+    indicator.style.left = `${boundary.indicatorX - rowRect.left}px`;
+    indicator.dataset.heatId = boundary.heatId;
+    indicator.dataset.heatNumber = String(boundary.heatNumber);
+    indicator.dataset.leftLane = String(boundary.leftLane);
+    indicator.dataset.rightLane = String(boundary.rightLane);
+    indicator.dataset.shiftDirection = boundary.shiftDirection || '';
+    indicator.classList.add('is-active');
+  }
+
+  function clearInsertIndicator(lanesEl) {
+    const indicator = lanesEl.querySelector('.mm-insert-indicator');
+    if (!indicator) return;
+    indicator.classList.remove('is-active');
+    delete indicator.dataset.heatId;
+    delete indicator.dataset.heatNumber;
+    delete indicator.dataset.leftLane;
+    delete indicator.dataset.rightLane;
+    delete indicator.dataset.shiftDirection;
   }
 
   async function moveRecordWithinOrganizer(eventId, sourceRecordId, targetSlot) {
@@ -2035,6 +2425,20 @@
     }
   }
 
+  async function insertRecordBetweenOrganizerLanes(eventId, sourceRecordId, boundary) {
+    if (isOperationInFlight()) return;
+    const sourceRecord = allRecords.find(r => r.id === sourceRecordId);
+    if (!sourceRecord) return;
+
+    const plan = buildLaneInsertAssignments(eventId, sourceRecord, boundary);
+    if (!plan) {
+      alert('Could not insert swimmer there: no open lane is available to shift swimmers in either direction.');
+      return;
+    }
+
+    await applyOrganizerAssignments(eventId, plan.assignments, null, 'Shifting swimmers...');
+  }
+
   function heatLaneTargets(eventId) {
     return heatsFor(eventId).flatMap(heat => {
       const heatNumber = heatNumberFor(heat, 'target heat');
@@ -2069,6 +2473,127 @@
       heatNumber: heatNumberFor(heat, `heat for event record ${record.id}`),
       laneNumber,
     };
+  }
+
+  function laneInsertDirectionOrder(sourceSlot, boundary) {
+    if (['left', 'right'].includes(boundary?.shiftDirection)) return [boundary.shiftDirection];
+    const sourceLane = Number(sourceSlot?.laneNumber);
+    if (!Number.isInteger(sourceLane)) return ['left', 'right'];
+
+    if (sourceSlot?.heatId === boundary.heatId) {
+      if (sourceLane <= boundary.leftLane) return ['left', 'right'];
+      return ['right', 'left'];
+    }
+
+    if (sourceLane < boundary.leftLane) return ['left', 'right'];
+    if (sourceLane > boundary.rightLane) return ['right', 'left'];
+    return ['left', 'right'];
+  }
+
+  function laneInsertPointerDirection(boundary, clientX) {
+    if (Number(clientX) < Number(boundary.indicatorX)) return 'left';
+    if (Number(clientX) > Number(boundary.indicatorX)) return 'right';
+    return null;
+  }
+
+  function shiftedLaneTargetsForInsert(occupantByLane, sourceRecord, insertionLane, direction, laneTotal) {
+    const step = direction === 'left' ? -1 : 1;
+    const endLane = direction === 'left' ? 1 : laneTotal;
+    let emptyLane = null;
+
+    for (let lane = insertionLane; direction === 'left' ? lane >= endLane : lane <= endLane; lane += step) {
+      if (!occupantByLane.has(lane)) {
+        emptyLane = lane;
+        break;
+      }
+    }
+    if (emptyLane === null) return null;
+
+    const targets = [];
+    if (direction === 'left') {
+      for (let lane = emptyLane; lane < insertionLane; lane++) {
+        const shiftedRecord = occupantByLane.get(lane + 1);
+        if (shiftedRecord) targets.push({ record: shiftedRecord, laneNumber: lane });
+      }
+    } else {
+      for (let lane = emptyLane; lane > insertionLane; lane--) {
+        const shiftedRecord = occupantByLane.get(lane - 1);
+        if (shiftedRecord) targets.push({ record: shiftedRecord, laneNumber: lane });
+      }
+    }
+
+    targets.push({ record: sourceRecord, laneNumber: insertionLane });
+    return targets;
+  }
+
+  function laneInsertPlanForDirection(eventId, sourceRecord, boundary, direction) {
+    if (!sourceRecord || !boundary?.heatId) return null;
+    const heat = allHeats.find(h => h.id === boundary.heatId);
+    if (!heat) return null;
+
+    const laneTotal = requireLaneCount();
+    const heatNumber = heatNumberFor(heat, 'target heat');
+    const occupantByLane = new Map();
+
+    recordsFor(eventId)
+      .filter(record => record.id !== sourceRecord.id)
+      .filter(record => record.relationships?.heat?.data?.id === boundary.heatId)
+      .forEach(record => {
+        const lane = Number(record.attributes?.laneNumber);
+        if (Number.isInteger(lane) && lane > 0 && lane <= laneTotal) occupantByLane.set(lane, record);
+      });
+
+    const insertionLane = direction === 'left' ? Number(boundary.leftLane) : Number(boundary.rightLane);
+    if (!Number.isInteger(insertionLane) || insertionLane <= 0 || insertionLane > laneTotal) return null;
+
+    const targets = shiftedLaneTargetsForInsert(occupantByLane, sourceRecord, insertionLane, direction, laneTotal);
+    if (!targets) return null;
+
+    const assignments = targets.map(({ record, laneNumber }) => buildAssignment(record, {
+      heatId: boundary.heatId,
+      heatNumber,
+      laneNumber,
+    }));
+
+    return { direction, assignments };
+  }
+
+  function chooseLaneInsertPlan(eventId, sourceRecord, boundary, clientX = null) {
+    if (!sourceRecord || !boundary?.heatId) return null;
+
+    if (['left', 'right'].includes(boundary.shiftDirection)) {
+      return laneInsertPlanForDirection(eventId, sourceRecord, boundary, boundary.shiftDirection);
+    }
+
+    const leftPlan = laneInsertPlanForDirection(eventId, sourceRecord, boundary, 'left');
+    const rightPlan = laneInsertPlanForDirection(eventId, sourceRecord, boundary, 'right');
+    if (leftPlan && rightPlan) {
+      return (laneInsertPointerDirection(boundary, clientX) === 'right') ? rightPlan : leftPlan;
+    }
+    if (leftPlan || rightPlan) return leftPlan || rightPlan;
+
+    const sourceSlot = recordCurrentSlot(sourceRecord);
+    for (const direction of laneInsertDirectionOrder(sourceSlot, boundary)) {
+      const plan = laneInsertPlanForDirection(eventId, sourceRecord, boundary, direction);
+      if (plan) return plan;
+    }
+
+    return null;
+  }
+
+  function buildLaneInsertAssignments(eventId, sourceRecord, boundary) {
+    if (!sourceRecord || !boundary?.heatId) return null;
+    if (['left', 'right'].includes(boundary.shiftDirection)) {
+      return chooseLaneInsertPlan(eventId, sourceRecord, boundary);
+    }
+
+    const sourceSlot = recordCurrentSlot(sourceRecord);
+    for (const direction of laneInsertDirectionOrder(sourceSlot, boundary)) {
+      const plan = laneInsertPlanForDirection(eventId, sourceRecord, boundary, direction);
+      if (plan) return plan;
+    }
+
+    return null;
   }
 
   function allSlotsForHeats(heats) {
@@ -2134,6 +2659,36 @@
       const heatNumber = heatNumberFor(heat, 'target heat');
       genderChunkLaneAssignments(chunk.records, laneTotal).forEach(({ record, laneNumber }) => {
         assignments.push(buildAssignment(record, { heatId: heat.id, heatNumber, laneNumber }));
+      });
+    });
+
+    await applyOrganizerAssignments(eventId, assignments, button, 'Grouping...');
+  }
+
+  async function organizeByAgeGroup(eventId, button) {
+    const heats = heatsFor(eventId);
+    const records = recordsFor(eventId);
+    const laneTotal = requireLaneCount();
+    const chunks = planAgeGroupHeatChunks(records, laneTotal, organizerHeatOrder, eventId);
+    const targetHeats = heats.slice(0, chunks.length);
+    const lanes = laneSeedOrder();
+
+    if (targetHeats.length < chunks.length) {
+      alert('Could not find enough heats to organize this event. Refresh meet data and try again.');
+      return;
+    }
+
+    const assignments = [];
+    chunks.forEach((chunk, heatIndex) => {
+      const heat = targetHeats[heatIndex];
+      const heatNumber = heatNumberFor(heat, 'target heat');
+
+      chunk.records.slice().sort(compareFastestFirst).forEach((record, laneIndex) => {
+        assignments.push(buildAssignment(record, {
+          heatId: heat.id,
+          heatNumber,
+          laneNumber: lanes[laneIndex],
+        }));
       });
     });
 
@@ -2303,6 +2858,35 @@
       });
     if (targetEventId) ids.add(targetEventId);
     return Array.from(ids);
+  }
+
+  function rememberOriginalAgeGroupsForMovedRecords(results, targetEventId) {
+    if (!targetEventId) return;
+    const store = readOriginalAgeGroupStore();
+    let changed = false;
+
+    results
+      .filter(result => result.success)
+      .forEach(result => {
+        const record = result.sourceRecord;
+        const athleteId = recordAthleteId(record);
+        const sourceEventId = record?.relationships?.event?.data?.id;
+        const sourceEvent = allEvents.find(evt => evt.id === sourceEventId);
+        const info = ageGroupInfoForEvent(sourceEvent);
+        if (!athleteId || !info) return;
+        store[originalAgeGroupRecordKey(targetEventId, athleteId)] = {
+          meetId: meetId || null,
+          eventId: sourceEventId,
+          label: info.label,
+          shortLabel: info.shortLabel,
+          min: info.sortMin,
+          max: info.sortMax,
+          eventSort: info.eventSort,
+        };
+        changed = true;
+      });
+
+    if (changed) writeOriginalAgeGroupStore(store);
   }
 
   async function removeEmptyHeatsForEvents(a, eventIds) {
@@ -2547,6 +3131,7 @@
       setBusyMessage(`Moving ${moves.length} swimmer${moves.length === 1 ? '' : 's'} into the target event...`);
       const results = await a.batchMove(moves);
       const failures = results.filter(r => !r.success);
+      rememberOriginalAgeGroupsForMovedRecords(results, opp.targetEvent.id);
       const changedEventIds = cleanupEventIdsForMerge(opp);
 
       if (failures.length > 0) {
