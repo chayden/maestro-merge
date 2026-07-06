@@ -61,6 +61,10 @@
   animation: mm-spin 0.8s linear infinite;
 }
 
+.mm-busy-overlay.mm-busy-has-progress .mm-spinner {
+  display: none;
+}
+
 .mm-busy-title {
   color: #eff8ff;
   font-size: 14px;
@@ -72,6 +76,38 @@
   color: #a9bdcf;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.mm-busy-progress {
+  display: none;
+  margin-top: 14px;
+}
+
+.mm-busy-overlay.mm-busy-has-progress .mm-busy-progress {
+  display: block;
+}
+
+.mm-busy-progress-track {
+  height: 9px;
+  overflow: hidden;
+  border: 1px solid #315572;
+  border-radius: 999px;
+  background: #0d141d;
+}
+
+.mm-busy-progress-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: #67cdf4;
+  transition: width 0.16s ease;
+}
+
+.mm-busy-progress-label {
+  margin-top: 6px;
+  color: #a9bdcf;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 @keyframes mm-spin {
@@ -192,6 +228,7 @@
 
 .mm-dashboard-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 14px;
   border-bottom: 1px solid #26384f;
@@ -238,6 +275,134 @@
 .mm-tab.is-active span {
   background: #25577f;
   color: #f5fbff;
+}
+
+.mm-awards {
+  display: grid;
+  gap: 12px;
+}
+
+.mm-award-report-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.mm-award-report {
+  width: 100%;
+  min-height: 260px;
+  box-sizing: border-box;
+  border: 1px solid #31455f;
+  border-radius: 6px;
+  padding: 10px;
+  resize: vertical;
+  background: #0f151d;
+  color: #dce7f4;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.mm-award-event {
+  border: 1px solid #2b405a;
+  border-radius: 8px;
+  background: #151a23;
+  padding: 12px;
+}
+
+.mm-award-event-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #26384f;
+}
+
+.mm-award-event-header strong {
+  display: block;
+  color: #e8eef7;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.mm-award-event-header span {
+  color: #8190a3;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.mm-award-event-header > span {
+  flex: 0 0 auto;
+  color: #a9d8ff;
+  font-weight: 700;
+}
+
+.mm-award-heat {
+  padding-top: 12px;
+}
+
+.mm-award-heat-title {
+  color: #dce7f4;
+  font-size: 12px;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.mm-award-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mm-award-gender {
+  min-width: 0;
+}
+
+.mm-award-gender-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #9eb0c6;
+  font-size: 11px;
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+
+.mm-award-swimmers {
+  display: grid;
+  gap: 5px;
+}
+
+.mm-award-swimmer {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 2px 6px;
+  align-items: center;
+  padding: 6px;
+  border: 1px solid #26384f;
+  border-radius: 6px;
+  background: #101620;
+}
+
+.mm-award-lane {
+  grid-row: span 2;
+  color: #a9d8ff;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.mm-award-swimmer strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #e1eaf5;
+  font-size: 11px;
+}
+
+.mm-award-swimmer span:not(.mm-award-lane) {
+  color: #8190a3;
+  font-size: 10px;
+  line-height: 1.25;
 }
 
 .mm-proposed-filter {
@@ -811,6 +976,27 @@
   gap: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid #26384f;
+}
+
+.mm-organizer-heading {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mm-organizer-heading-text {
+  min-width: 0;
+}
+
+.mm-organizer-nav {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
 }
 
 .mm-organizer-title {
