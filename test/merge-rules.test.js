@@ -165,6 +165,13 @@ function chunkGenderCounts(chunk, athletes) {
   }, {});
 }
 
+function chunkSlowestSeedValue(chunk) {
+  return Math.max(...chunk.records.map(rec => {
+    const seed = rec.attributes?.seedTimeInt;
+    return seed === null || seed === undefined ? Infinity : Number(seed);
+  }));
+}
+
 function opportunitySourceIds(opportunity) {
   return opportunity.sourceEvents.map(evt => evt.id).sort();
 }
@@ -521,6 +528,70 @@ test('gender organizer uses normal time sorting when all swimmers share one gend
   );
 });
 
+test('organizer event navigation follows seeded event order and skips empty events', () => {
+  const harness = loadMergeTestHarness();
+  const first = meetEvent('event-1', { number: '1' });
+  const empty = meetEvent('event-2', { number: '2' });
+  const middle = meetEvent('event-3', { number: '3' });
+  const last = meetEvent('event-4', { number: '4' });
+
+  loadMeet(harness, {
+    events: [last, empty, middle, first],
+    entries: {
+      [first.id]: 1,
+      [middle.id]: 1,
+      [last.id]: 1,
+    },
+    laneCount: 4,
+  });
+
+  assert.deepEqual(harness.organizerEventNeighbors(first.id), { previous: null, next: middle });
+  assert.deepEqual(harness.organizerEventNeighbors(middle.id), { previous: first, next: last });
+  assert.deepEqual(harness.organizerEventNeighbors(last.id), { previous: middle, next: null });
+});
+
+test('mixed gender award summaries list boys and girls in populated mixed target heats', () => {
+  const harness = loadMergeTestHarness();
+  const target = meetEvent('mixed-target', { number: '1A', gender: 'X' });
+  const regularMixed = meetEvent('regular-mixed', { number: '2', gender: 'X' });
+  const boysTarget = meetEvent('boys-target', { number: '3A', gender: 'M' });
+  const targetRecords = seededGenderedMeetRecords(target.id, 4, [
+    { gender: 'F', seedTimeInt: 1010, name: 'Alice' },
+    { gender: 'M', seedTimeInt: 1020, name: 'Ben' },
+    { gender: 'M', seedTimeInt: 1030, name: 'Cam' },
+    { gender: 'F', seedTimeInt: 1040, name: 'Dana' },
+    { gender: 'M', seedTimeInt: 1050, name: 'Eli' },
+    { gender: 'M', seedTimeInt: 1060, name: 'Finn' },
+    { gender: 'F', seedTimeInt: 1070, name: 'Gia' },
+    { gender: 'F', seedTimeInt: 1080, name: 'Hope' },
+  ]);
+  const regularRecords = genderedMeetRecords(regularMixed.id, 4, ['F', 'M']);
+  const boysRecords = genderedMeetRecords(boysTarget.id, 4, ['M', 'M']);
+
+  harness.setData({
+    events: [regularMixed, boysTarget, target],
+    records: [...targetRecords.records, ...regularRecords.records, ...boysRecords.records],
+    athletes: [...targetRecords.athletes, ...regularRecords.athletes, ...boysRecords.athletes],
+    heats: [heat(target.id, 1), heat(target.id, 2), heat(regularMixed.id, 1), heat(boysTarget.id, 1)],
+    laneCount: 4,
+  });
+
+  const summaries = harness.collectMixedGenderAwardSummaries();
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].eventId, target.id);
+  assert.deepEqual(summaries[0].mixedHeats.map(heatSummary => heatSummary.heatNumber), [1, 2]);
+  assert.deepEqual(summaries[0].mixedHeats[0].girls.map(swimmer => swimmer.laneNumber), [1, 4]);
+  assert.deepEqual(summaries[0].mixedHeats[0].boys.map(swimmer => swimmer.laneNumber), [2, 3]);
+  assert.deepEqual(summaries[0].mixedHeats[1].girls.map(swimmer => swimmer.laneNumber), [3, 4]);
+  assert.deepEqual(summaries[0].mixedHeats[1].boys.map(swimmer => swimmer.laneNumber), [1, 2]);
+
+  const report = harness.formatMixedGenderAwardReport(summaries);
+  assert.match(report, /Mixed Gender Award Heats/);
+  assert.match(report, /#1A 7-8 Freestyle/);
+  assert.match(report, /  Heat 1\n  Boys\n    L2  Ben  10\.20\n    L3  Cam  10\.30\n  Girls\n    L1  Alice  10\.10\n    L4  Dana  10\.40/);
+  assert.match(report, /  Heat 2\n  Boys\n    L1  Eli  10\.50\n    L2  Finn  10\.60\n  Girls\n    L3  Gia  10\.70\n    L4  Hope  10\.80/);
+});
+
 test('gender organizer preserves fastest donor swimmers together after filling a mixed heat', () => {
   const harness = loadMergeTestHarness();
   const eventId = 'mixed-target';
@@ -555,6 +626,127 @@ test('gender organizer preserves fastest donor swimmers together after filling a
   assert.deepEqual(fastFirstChunks.map(chunk => chunk.records.length), [8, 4, 6]);
   assert.deepEqual(chunkGenderCounts(fastFirstChunks[0], athletes), { M: 8 });
   assert.deepEqual(chunkGenderCounts(fastFirstChunks[2], athletes), { F: 4, M: 2 });
+});
+
+test('minimized gender organizer uses zero combined heats when genders already fit separate heats', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'mixed-target';
+  const { records, athletes } = genderedMeetRecords(eventId, 6, [
+    'M', 'M', 'M', 'M', 'M', 'M',
+    'M', 'M', 'M', 'M', 'M', 'M',
+    'F', 'F', 'F', 'F', 'F', 'F',
+    'F', 'F', 'F', 'F', 'F', 'F',
+  ]);
+
+  harness.setData({ records, athletes, laneCount: 6 });
+
+  const chunks = harness.planGenderHeatChunks(records, 6, 'slowest-first', 'minimize');
+  assert.deepEqual(chunks.map(chunk => chunk.records.length), [6, 6, 6, 6]);
+  assert.deepEqual(
+    chunks.map(chunk => Object.keys(chunkGenderCounts(chunk, athletes))),
+    [['F'], ['F'], ['M'], ['M']],
+  );
+});
+
+test('balanced gender organizer uses the first two slow heats as three-and-three mixed heats when possible', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'mixed-target';
+  const { records, athletes } = genderedMeetRecords(eventId, 8, [
+    'M', 'M', 'M', 'M', 'M', 'M', 'M',
+    'M', 'M', 'M', 'M', 'M', 'M', 'M',
+    'F', 'F', 'F', 'F', 'F', 'F',
+  ]);
+
+  harness.setData({ records, athletes, laneCount: 8 });
+
+  const chunks = harness.planGenderHeatChunks(records, 8, 'slowest-first', 'balanced');
+  assert.deepEqual(chunks.map(chunk => chunk.records.length), [6, 6, 8]);
+  assert.deepEqual(chunkGenderCounts(chunks[0], athletes), { F: 3, M: 3 });
+  assert.deepEqual(chunkGenderCounts(chunks[1], athletes), { F: 3, M: 3 });
+  assert.deepEqual(chunkGenderCounts(chunks[2], athletes), { M: 8 });
+  assert.deepEqual(
+    chunks[0].records.map(rec => rec.id),
+    [
+      'mixed-target-record-20',
+      'mixed-target-record-19',
+      'mixed-target-record-18',
+      'mixed-target-record-14',
+      'mixed-target-record-13',
+      'mixed-target-record-12',
+    ],
+  );
+});
+
+test('balanced gender organizer splits limited minority swimmers across both combined heats', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'mixed-target';
+  const { records, athletes } = genderedMeetRecords(eventId, 8, [
+    'M', 'M', 'M', 'M', 'M', 'M', 'M',
+    'F', 'F', 'F', 'F',
+  ]);
+
+  harness.setData({ records, athletes, laneCount: 8 });
+
+  const chunks = harness.planGenderHeatChunks(records, 8, 'slowest-first', 'balanced');
+  assert.deepEqual(chunks.map(chunk => chunk.records.length), [5, 6]);
+  assert.deepEqual(chunkGenderCounts(chunks[0], athletes), { F: 2, M: 3 });
+  assert.deepEqual(chunkGenderCounts(chunks[1], athletes), { F: 2, M: 4 });
+});
+
+test('balanced gender organizer avoids leaving a one-swimmer single-gender heat when another split fits', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'mixed-target';
+  const { records, athletes } = genderedMeetRecords(eventId, 4, [
+    'F', 'F', 'F', 'F',
+    'M', 'M', 'M', 'M', 'M',
+  ]);
+
+  harness.setData({ records, athletes, laneCount: 4 });
+
+  const chunks = harness.planGenderHeatChunks(records, 4, 'slowest-first', 'balanced');
+  const counts = chunks.map(chunk => chunkGenderCounts(chunk, athletes));
+  assert.equal(chunks.length, 3);
+  assert.equal(counts.filter(count => count.F && count.M).length, 2);
+  assert.equal(
+    counts.some(count => (!count.F && count.M === 1) || (!count.M && count.F === 1)),
+    false,
+  );
+});
+
+test('balanced gender organizer orders heats by the slowest swimmer in each heat', () => {
+  const harness = loadMergeTestHarness();
+  const eventId = 'mixed-target';
+  const { records, athletes } = seededGenderedMeetRecords(eventId, 8, [
+    { gender: 'M', seedTimeInt: 1000 },
+    { gender: 'M', seedTimeInt: 1100 },
+    { gender: 'M', seedTimeInt: 1200 },
+    { gender: 'M', seedTimeInt: 1300 },
+    { gender: 'M', seedTimeInt: 1400 },
+    { gender: 'M', seedTimeInt: 1500 },
+    { gender: 'M', seedTimeInt: 1600 },
+    { gender: 'M', seedTimeInt: 1700 },
+    { gender: 'M', seedTimeInt: 1800 },
+    { gender: 'M', seedTimeInt: 1900 },
+    { gender: 'M', seedTimeInt: null },
+    { gender: 'M', seedTimeInt: null },
+    { gender: 'F', seedTimeInt: 1000 },
+    { gender: 'F', seedTimeInt: 1100 },
+    { gender: 'F', seedTimeInt: 1200 },
+    { gender: 'F', seedTimeInt: 1300 },
+    { gender: 'F', seedTimeInt: 1400 },
+    { gender: 'F', seedTimeInt: 1500 },
+  ]);
+
+  harness.setData({ records, athletes, laneCount: 6 });
+
+  const slowFirstValues = harness.planGenderHeatChunks(records, 6, 'slowest-first', 'balanced')
+    .map(chunkSlowestSeedValue);
+  assert.equal(slowFirstValues[0], Infinity, 'NT heat is ordered as the slowest heat');
+  assert.deepEqual(slowFirstValues, slowFirstValues.slice().sort((a, b) => b - a));
+
+  const fastFirstValues = harness.planGenderHeatChunks(records, 6, 'fastest-first', 'balanced')
+    .map(chunkSlowestSeedValue);
+  assert.deepEqual(fastFirstValues, fastFirstValues.slice().sort((a, b) => a - b));
 });
 
 test('gender organizer places fastest boy and girl next to each other in mixed heats', () => {

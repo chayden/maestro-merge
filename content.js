@@ -260,6 +260,30 @@
     if (messageEl) messageEl.textContent = message;
   }
 
+  function clearBusyProgress() {
+    const overlay = document.getElementById('mm-busy-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('mm-busy-has-progress');
+    const fill = overlay.querySelector('.mm-busy-progress-fill');
+    const label = overlay.querySelector('.mm-busy-progress-label');
+    if (fill) fill.style.width = '0%';
+    if (label) label.textContent = '';
+  }
+
+  function setBusyProgress(completed, total, message = null) {
+    const overlay = document.getElementById('mm-busy-overlay');
+    if (!overlay) return;
+    const safeTotal = Math.max(1, Number(total) || 1);
+    const safeCompleted = Math.max(0, Math.min(Number(completed) || 0, safeTotal));
+    const percent = Math.round((safeCompleted / safeTotal) * 100);
+    overlay.classList.add('mm-busy-has-progress');
+    const fill = overlay.querySelector('.mm-busy-progress-fill');
+    const label = overlay.querySelector('.mm-busy-progress-label');
+    if (fill) fill.style.width = `${percent}%`;
+    if (label) label.textContent = `${safeCompleted} of ${safeTotal}`;
+    if (message) setBusyMessage(message);
+  }
+
   function beginOperation(message) {
     operationDepth++;
     if (mergePanel) {
@@ -267,6 +291,7 @@
       mergePanel.setAttribute('aria-busy', 'true');
       setPanelInteractionLocked(true);
     }
+    clearBusyProgress();
     setBusyMessage(message);
 
     return () => {
@@ -277,6 +302,7 @@
         mergePanel.removeAttribute('aria-busy');
         setPanelInteractionLocked(false);
       }
+      clearBusyProgress();
     };
   }
 
@@ -632,19 +658,190 @@
     return chunkRecordsByHeatSize(records, balancedHeatSizes(records.length, heatCount));
   }
 
-  function planGenderHeatChunks(records, laneTotal = requireLaneCount(), heatOrder = organizerHeatOrder) {
-    const heatCount = heatSizesForEntryCount(records.length, laneTotal).length;
-    if (heatCount === 0) return [];
-
-    const groups = {
+  function genderHeatGroups(records) {
+    return {
       F: records.filter(r => athleteGender(r) === 'F').sort(compareSlowestFirst),
       M: records.filter(r => athleteGender(r) === 'M').sort(compareSlowestFirst),
       O: records.filter(r => !['F', 'M'].includes(athleteGender(r))).sort(compareSlowestFirst),
     };
+  }
+
+  function singleGenderChunks(records, laneTotal) {
+    return chunkRecordsByHeatSize(records, heatSizesForEntryCount(records.length, laneTotal))
+      .filter(chunkRecords => chunkRecords.length > 0)
+      .map(chunkRecords => ({ records: chunkRecords }));
+  }
+
+  function genderChunkHeatCount(records, laneTotal) {
+    return records.length ? heatSizesForEntryCount(records.length, laneTotal).length : 0;
+  }
+
+  function singletonGenderHeatCount(entryCount, laneTotal) {
+    return heatSizesForEntryCount(entryCount, laneTotal).filter(size => size === 1).length;
+  }
+
+  function orderGenderChunksForHeatOrder(chunks, heatOrder) {
+    const ordered = chunks.slice().sort((a, b) => {
+      const slowestDiff = compareSlowestFirst(a.records[0], b.records[0]);
+      if (slowestDiff !== 0) return slowestDiff;
+      return b.records.length - a.records.length;
+    });
+    return heatOrder === 'fastest-first' ? ordered.reverse() : ordered;
+  }
+
+  function genderMixedChunk(groups, femaleCount, maleCount) {
+    return {
+      records: [
+        ...groups.F.splice(0, femaleCount),
+        ...groups.M.splice(0, maleCount),
+      ].sort(compareSlowestFirst),
+    };
+  }
+
+  function findMinimizedGenderMix(groups, laneTotal, heatCount) {
+    const desiredMixedSize = Math.min(laneTotal, Math.ceil((groups.F.length + groups.M.length) / heatCount));
+    let best = null;
+
+    for (let femaleCount = 1; femaleCount <= Math.min(groups.F.length, laneTotal - 1); femaleCount++) {
+      for (let maleCount = 1; maleCount <= Math.min(groups.M.length, laneTotal - femaleCount); maleCount++) {
+        const remainingHeatCount =
+          genderChunkHeatCount(groups.F.slice(femaleCount), laneTotal) +
+          genderChunkHeatCount(groups.M.slice(maleCount), laneTotal);
+        if (remainingHeatCount + 1 > heatCount) continue;
+
+        const size = femaleCount + maleCount;
+        const candidate = {
+          femaleCount,
+          maleCount,
+          size,
+          desiredDiff: Math.abs(size - desiredMixedSize),
+          balanceDiff: Math.abs(femaleCount - maleCount),
+        };
+        if (!best ||
+          candidate.desiredDiff < best.desiredDiff ||
+          (candidate.desiredDiff === best.desiredDiff && candidate.size > best.size) ||
+          (candidate.desiredDiff === best.desiredDiff && candidate.size === best.size && candidate.balanceDiff < best.balanceDiff)
+        ) {
+          best = candidate;
+        }
+      }
+    }
+
+    return best;
+  }
+
+  function planMinimizedCombinedGenderHeatChunks(records, laneTotal, heatOrder) {
+    const heatCount = heatSizesForEntryCount(records.length, laneTotal).length;
+    const groups = genderHeatGroups(records);
+    const mix = findMinimizedGenderMix(groups, laneTotal, heatCount);
+    if (!mix) {
+      const singleChunks = [
+        ...singleGenderChunks(groups.F, laneTotal),
+        ...singleGenderChunks(groups.M, laneTotal),
+      ];
+      if (singleChunks.length <= heatCount) return orderGenderChunksForHeatOrder(singleChunks, heatOrder);
+      return planTimeHeatChunks(records, laneTotal, heatOrder);
+    }
+
+    const workingGroups = {
+      F: groups.F.slice(),
+      M: groups.M.slice(),
+    };
+    const mixedChunk = genderMixedChunk(workingGroups, mix.femaleCount, mix.maleCount);
+    const singleChunks = [
+      ...singleGenderChunks(workingGroups.F, laneTotal),
+      ...singleGenderChunks(workingGroups.M, laneTotal),
+    ];
+    const chunks = [mixedChunk, ...orderGenderChunksForHeatOrder(singleChunks, 'slowest-first')];
+
+    return heatOrder === 'fastest-first' ? chunks.reverse() : chunks;
+  }
+
+  function findBalancedGenderMixes(groups, laneTotal, heatCount) {
+    let best = null;
+
+    for (let femaleOne = 1; femaleOne <= Math.min(groups.F.length - 1, laneTotal - 1); femaleOne++) {
+      for (let maleOne = 1; maleOne <= Math.min(groups.M.length - 1, laneTotal - femaleOne); maleOne++) {
+        for (let femaleTwo = 1; femaleTwo <= Math.min(groups.F.length - femaleOne, laneTotal - 1); femaleTwo++) {
+          for (let maleTwo = 1; maleTwo <= Math.min(groups.M.length - maleOne, laneTotal - femaleTwo); maleTwo++) {
+            const remainingFemale = groups.F.length - femaleOne - femaleTwo;
+            const remainingMale = groups.M.length - maleOne - maleTwo;
+            const remainingHeatCount =
+              genderChunkHeatCount(groups.F.slice(0, remainingFemale), laneTotal) +
+              genderChunkHeatCount(groups.M.slice(0, remainingMale), laneTotal);
+            if (remainingHeatCount + 2 > heatCount) continue;
+
+            const sizeOne = femaleOne + maleOne;
+            const sizeTwo = femaleTwo + maleTwo;
+            const candidate = {
+              mixes: [
+                { femaleCount: femaleOne, maleCount: maleOne },
+                { femaleCount: femaleTwo, maleCount: maleTwo },
+              ],
+              singletonCount: singletonGenderHeatCount(remainingFemale, laneTotal) +
+                singletonGenderHeatCount(remainingMale, laneTotal),
+              sameGenderFloor: Math.min(femaleOne, femaleTwo, maleOne, maleTwo),
+              totalMixed: sizeOne + sizeTwo,
+              heatSizeDiff: Math.abs(sizeOne - sizeTwo),
+              sideBalanceDiff: Math.abs(femaleOne - maleOne) + Math.abs(femaleTwo - maleTwo),
+            };
+            if (!best ||
+              candidate.singletonCount < best.singletonCount ||
+              (candidate.singletonCount === best.singletonCount && candidate.sameGenderFloor > best.sameGenderFloor) ||
+              (candidate.singletonCount === best.singletonCount && candidate.sameGenderFloor === best.sameGenderFloor && candidate.totalMixed < best.totalMixed) ||
+              (candidate.singletonCount === best.singletonCount && candidate.sameGenderFloor === best.sameGenderFloor && candidate.totalMixed === best.totalMixed && candidate.heatSizeDiff < best.heatSizeDiff) ||
+              (candidate.singletonCount === best.singletonCount && candidate.sameGenderFloor === best.sameGenderFloor && candidate.totalMixed === best.totalMixed && candidate.heatSizeDiff === best.heatSizeDiff && candidate.sideBalanceDiff < best.sideBalanceDiff)
+            ) {
+              best = candidate;
+            }
+          }
+        }
+      }
+    }
+
+    return best;
+  }
+
+  function planBalancedCombinedGenderHeatChunks(records, laneTotal, heatOrder) {
+    const heatCount = heatSizesForEntryCount(records.length, laneTotal).length;
+    if (heatCount < 2) return planTimeHeatChunks(records, laneTotal, heatOrder);
+
+    const groups = genderHeatGroups(records);
+    const plan = findBalancedGenderMixes(groups, laneTotal, heatCount);
+    if (!plan) return planMinimizedCombinedGenderHeatChunks(records, laneTotal, heatOrder);
+
+    const workingGroups = {
+      F: groups.F.slice(),
+      M: groups.M.slice(),
+    };
+    const mixedChunks = plan.mixes.map(mix => genderMixedChunk(workingGroups, mix.femaleCount, mix.maleCount));
+    const singleChunks = [
+      ...singleGenderChunks(workingGroups.F, laneTotal),
+      ...singleGenderChunks(workingGroups.M, laneTotal),
+    ];
+    const chunks = orderGenderChunksForHeatOrder([
+      ...mixedChunks,
+      ...orderGenderChunksForHeatOrder(singleChunks, 'slowest-first'),
+    ], heatOrder);
+
+    return chunks;
+  }
+
+  function planGenderHeatChunks(records, laneTotal = requireLaneCount(), heatOrder = organizerHeatOrder, mode = 'minimize') {
+    const heatCount = heatSizesForEntryCount(records.length, laneTotal).length;
+    if (heatCount === 0) return [];
+
+    const groups = genderHeatGroups(records);
     const activeGenders = ['F', 'M', 'O'].filter(gender => groups[gender].length > 0);
 
     if (heatCount === 1 || activeGenders.length <= 1) {
       return planTimeHeatChunks(records, laneTotal, heatOrder);
+    }
+
+    if (groups.O.length === 0 && groups.F.length > 0 && groups.M.length > 0) {
+      return mode === 'balanced'
+        ? planBalancedCombinedGenderHeatChunks(records, laneTotal, heatOrder)
+        : planMinimizedCombinedGenderHeatChunks(records, laneTotal, heatOrder);
     }
 
     const donorGender = activeGenders
@@ -1074,6 +1271,78 @@
     const heats = currentHeatCount(evt);
     if (heats === null) return `${entries} entr${entries === 1 ? 'y' : 'ies'} / no heat resources`;
     return `${entries} entr${entries === 1 ? 'y' : 'ies'} / ${heats} heat${heats === 1 ? '' : 's'}`;
+  }
+
+  function awardSwimmerSummary(record) {
+    return {
+      id: record.id,
+      name: recordDisplayName(record),
+      team: recordTeamAbbreviation(record),
+      laneNumber: Number(record.attributes?.laneNumber) || null,
+      seedTime: recordSeedTime(record),
+      gender: athleteGender(record),
+    };
+  }
+
+  function collectMixedGenderAwardSummaries() {
+    return allEvents
+      .filter(evt => isMergeTarget(evt) && eventGender(evt) === 'X' && recordsFor(evt.id).length > 0)
+      .sort(compareEventOrder)
+      .map(evt => {
+        const eventRecords = recordsFor(evt.id);
+        const mixedHeats = heatsFor(evt.id)
+          .map(heat => {
+            const heatRecords = eventRecords
+              .filter(record => record.relationships?.heat?.data?.id === heat.id)
+              .slice()
+              .sort((a, b) => Number(a.attributes?.laneNumber || 0) - Number(b.attributes?.laneNumber || 0));
+            const boys = heatRecords.filter(record => athleteGender(record) === 'M').map(awardSwimmerSummary);
+            const girls = heatRecords.filter(record => athleteGender(record) === 'F').map(awardSwimmerSummary);
+            if (boys.length === 0 || girls.length === 0) return null;
+            return {
+              heatId: heat.id,
+              heatNumber: heatNumberFor(heat, 'mixed award heat'),
+              boys,
+              girls,
+            };
+          })
+          .filter(Boolean);
+
+        return {
+          eventId: evt.id,
+          eventLabel: eventLabel(evt),
+          raceLabel: raceLabel(evt),
+          entryCount: eventRecords.length,
+          mixedHeats,
+        };
+      });
+  }
+
+  function awardReportSwimmerLine(swimmer) {
+    const lane = swimmer.laneNumber ? `L${swimmer.laneNumber}` : 'Lane ?';
+    const team = swimmer.team ? ` (${swimmer.team})` : '';
+    return `    ${lane}  ${swimmer.name}${team}  ${swimmer.seedTime}`;
+  }
+
+  function formatMixedGenderAwardReport(summaries) {
+    const lines = ['Mixed Gender Award Heats'];
+    summaries.forEach(summary => {
+      lines.push('');
+      lines.push(summary.eventLabel);
+      lines.push(`${summary.raceLabel} - ${summary.entryCount} entr${summary.entryCount === 1 ? 'y' : 'ies'}`);
+      if (summary.mixedHeats.length === 0) {
+        lines.push('  No heats currently contain both boys and girls.');
+        return;
+      }
+      summary.mixedHeats.forEach(heat => {
+        lines.push(`  Heat ${heat.heatNumber}`);
+        lines.push('  Boys');
+        heat.boys.forEach(swimmer => lines.push(awardReportSwimmerLine(swimmer)));
+        lines.push('  Girls');
+        heat.girls.forEach(swimmer => lines.push(awardReportSwimmerLine(swimmer)));
+      });
+    });
+    return lines.join('\n');
   }
 
   function targetCapacityFor(evt) {
@@ -1593,6 +1862,8 @@
         dashboardOpportunityTab = null;
       },
       findOpportunities,
+      collectMixedGenderAwardSummaries,
+      formatMixedGenderAwardReport,
       findSuggestedMergeTargets,
       filterSuggestedMergeTargetsByAgeGroupLimit,
       ageGroupSpanForSourceEvents,
@@ -1603,6 +1874,7 @@
       laneSeedOrder,
       originalAgeGroupRecordKey,
       originalAgeGroupTileLabel,
+      organizerEventNeighbors,
       planAgeGroupHeatChunks,
       planGenderHeatChunks,
       planTimeHeatChunks,
@@ -1644,6 +1916,12 @@
           <div class="mm-spinner" aria-hidden="true"></div>
           <div class="mm-busy-title">Working</div>
           <div class="mm-busy-message">Please wait...</div>
+          <div class="mm-busy-progress" aria-hidden="true">
+            <div class="mm-busy-progress-track">
+              <div class="mm-busy-progress-fill"></div>
+            </div>
+            <div class="mm-busy-progress-label"></div>
+          </div>
         </div>
       </div>
     `;
@@ -1708,7 +1986,10 @@
   function renderOpportunities(opportunities, targetSuggestions = filterSuggestedMergeTargetsByAgeGroupLimit(findSuggestedMergeTargets())) {
     const el = document.getElementById('mm-body');
     if (!el) return;
-    if (!['existing', 'suggested', 'organize'].includes(dashboardOpportunityTab)) {
+    const awardSummaries = collectMixedGenderAwardSummaries();
+    const mixedHeatCount = awardSummaries.reduce((count, summary) => count + summary.mixedHeats.length, 0);
+    const awardsAvailable = awardSummaries.length > 0;
+    if (!['existing', 'suggested', 'organize', 'awards'].includes(dashboardOpportunityTab) || (dashboardOpportunityTab === 'awards' && !awardsAvailable)) {
       dashboardOpportunityTab = opportunities.length > 0 ? 'existing' : 'suggested';
     }
 
@@ -1717,11 +1998,14 @@
     const existingActive = activeTab === 'existing';
     const suggestedActive = activeTab === 'suggested';
     const organizeActive = activeTab === 'organize';
+    const awardsActive = activeTab === 'awards';
     const tabContent = existingActive
       ? renderExistingMergeOpportunities(opportunities)
       : suggestedActive
         ? renderSuggestedMergeTargets(targetSuggestions)
-        : renderSeededEvents(organizerEvents);
+        : organizeActive
+          ? renderSeededEvents(organizerEvents)
+          : renderMixedGenderAwardSummaries(awardSummaries);
     const emptyContent = existingActive
       ? `<div class="mm-empty">
           <div class="mm-empty-title">No existing-target merges found</div>
@@ -1733,10 +2017,15 @@
           <div class="mm-empty-copy">The loaded source events do not point to a heat-saving proposed merge within the current age-group span.</div>
           ${renderProposedMergeAgeGroupLimitControl()}
         </div>`
-        : `<div class="mm-empty">
-          <div class="mm-empty-title">No events to organize</div>
-          <div class="mm-empty-copy">No seeded events or heats were returned for this session.</div>
-        </div>`;
+        : organizeActive
+          ? `<div class="mm-empty">
+            <div class="mm-empty-title">No events to organize</div>
+            <div class="mm-empty-copy">No seeded events or heats were returned for this session.</div>
+          </div>`
+          : `<div class="mm-empty">
+            <div class="mm-empty-title">No mixed awards heats found</div>
+            <div class="mm-empty-copy">No populated mixed target currently has a heat with both boys and girls.</div>
+          </div>`;
 
     el.innerHTML = `
       <div class="mm-dashboard-tabs" role="tablist" aria-label="Merge opportunity type">
@@ -1749,6 +2038,9 @@
         <button class="mm-tab ${organizeActive ? 'is-active' : ''}" role="tab" aria-selected="${organizeActive ? 'true' : 'false'}" data-dashboard-tab="organize">
           Organize Heats <span>${organizerEvents.length}</span>
         </button>
+        ${awardsAvailable ? `<button class="mm-tab ${awardsActive ? 'is-active' : ''}" role="tab" aria-selected="${awardsActive ? 'true' : 'false'}" data-dashboard-tab="awards">
+          Mixed Awards <span>${mixedHeatCount}</span>
+        </button>` : ''}
       </div>
       ${tabContent || emptyContent}
     `;
@@ -1833,6 +2125,86 @@
     return html;
   }
 
+  function renderAwardSwimmerList(swimmers, label) {
+    return `<div class="mm-award-gender">
+      <div class="mm-award-gender-title">${esc(label)} <span>${swimmers.length}</span></div>
+      <div class="mm-award-swimmers">
+        ${swimmers.map(swimmer => `
+          <div class="mm-award-swimmer">
+            <span class="mm-award-lane">${swimmer.laneNumber ? `L${esc(swimmer.laneNumber)}` : 'Lane ?'}</span>
+            <strong>${esc(swimmer.name)}</strong>
+            ${swimmer.team ? `<span>${esc(swimmer.team)}</span>` : ''}
+            <span>${esc(swimmer.seedTime)}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>`;
+  }
+
+  function renderMixedGenderAwardSummaries(summaries) {
+    if (summaries.length === 0) return '';
+    const report = formatMixedGenderAwardReport(summaries);
+
+    return `<div class="mm-awards">
+      <div class="mm-context">
+        <div class="mm-context-title">Mixed heat award summary</div>
+        <div class="mm-context-copy">Copy this list for table workers, then use the grouped view below for quick checking.</div>
+        <div class="mm-award-report-actions">
+          <button class="mm-btn mm-btn-secondary mm-btn-sm mm-awards-copy">Copy Report</button>
+        </div>
+      </div>
+      <textarea class="mm-award-report" readonly rows="14" aria-label="Mixed gender award report">${esc(report)}</textarea>
+      ${summaries.map(summary => `
+        <div class="mm-award-event">
+          <div class="mm-award-event-header">
+            <div>
+              <strong>${esc(summary.eventLabel)}</strong>
+              <span>${esc(summary.raceLabel)} · ${summary.entryCount} entr${summary.entryCount === 1 ? 'y' : 'ies'}</span>
+            </div>
+            <span>${summary.mixedHeats.length} mixed heat${summary.mixedHeats.length === 1 ? '' : 's'}</span>
+          </div>
+          ${summary.mixedHeats.length === 0
+            ? '<div class="mm-muted">No heats in this event currently contain both boys and girls.</div>'
+            : summary.mixedHeats.map(heat => `
+              <div class="mm-award-heat">
+                <div class="mm-award-heat-title">Heat ${esc(heat.heatNumber)}</div>
+                <div class="mm-award-groups">
+                  ${renderAwardSwimmerList(heat.boys, 'Boys')}
+                  ${renderAwardSwimmerList(heat.girls, 'Girls')}
+                </div>
+              </div>
+            `).join('')}
+        </div>
+      `).join('')}
+    </div>`;
+  }
+
+  async function copyMixedGenderAwardReport(root, button) {
+    const report = root.querySelector('.mm-award-report');
+    if (!report) return;
+    const text = report.value;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        report.focus();
+        report.select();
+        document.execCommand('copy');
+      }
+      const originalText = button?.textContent;
+      if (button) {
+        button.textContent = 'Copied';
+        setTimeout(() => {
+          button.textContent = originalText || 'Copy Report';
+        }, 1200);
+      }
+    } catch (err) {
+      report.focus();
+      report.select();
+      alert('Could not copy automatically. The report text is selected; use Copy from your browser.');
+    }
+  }
+
   function wireDashboardButtons(root, opportunities, targetSuggestions = []) {
     root.querySelectorAll('.mm-tab').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -1866,6 +2238,9 @@
     });
     root.querySelectorAll('.mm-organize-event').forEach(btn => {
       btn.addEventListener('click', () => openOrganizer(btn.dataset.eventId));
+    });
+    root.querySelector('.mm-awards-copy')?.addEventListener('click', event => {
+      copyMixedGenderAwardReport(root, event.currentTarget);
     });
   }
 
@@ -1993,6 +2368,41 @@
     renderOrganizer(eventId);
   }
 
+  function organizerEventNeighbors(eventId) {
+    const events = seededEventsForOrganizer();
+    const index = events.findIndex(evt => evt.id === eventId);
+    return {
+      previous: index > 0 ? events[index - 1] : null,
+      next: index >= 0 && index < events.length - 1 ? events[index + 1] : null,
+    };
+  }
+
+  function renderOrganizerTop(evt, subtitle) {
+    const neighbors = organizerEventNeighbors(evt.id);
+    return `<div class="mm-organizer-top">
+      <button class="mm-btn mm-btn-back mm-back-dashboard"><span aria-hidden="true">&larr;</span> Back</button>
+      <div class="mm-organizer-heading">
+        <button class="mm-btn mm-btn-secondary mm-organizer-nav mm-organizer-prev" title="${neighbors.previous ? `Previous event: ${esc(eventLabel(neighbors.previous))}` : 'No previous event'}" aria-label="Previous event" ${neighbors.previous ? `data-event-id="${esc(neighbors.previous.id)}"` : 'disabled'}>
+          <span aria-hidden="true">&lsaquo;</span>
+        </button>
+        <div class="mm-organizer-heading-text">
+          <div class="mm-organizer-title">${esc(eventLabel(evt))}</div>
+          <div class="mm-organizer-subtitle">${subtitle}</div>
+        </div>
+        <button class="mm-btn mm-btn-secondary mm-organizer-nav mm-organizer-next" title="${neighbors.next ? `Next event: ${esc(eventLabel(neighbors.next))}` : 'No next event'}" aria-label="Next event" ${neighbors.next ? `data-event-id="${esc(neighbors.next.id)}"` : 'disabled'}>
+          <span aria-hidden="true">&rsaquo;</span>
+        </button>
+      </div>
+    </div>`;
+  }
+
+  function wireOrganizerTopHandlers(root) {
+    root.querySelector('.mm-back-dashboard')?.addEventListener('click', () => renderDashboard());
+    root.querySelectorAll('.mm-organizer-nav[data-event-id]').forEach(button => {
+      button.addEventListener('click', () => openOrganizer(button.dataset.eventId));
+    });
+  }
+
   function renderOrganizer(eventId) {
     currentView = 'organizer';
     organizerEventId = eventId;
@@ -2018,16 +2428,10 @@
     if (heats.length === 0) {
       el.innerHTML = `
         <div class="mm-organizer">
-          <div class="mm-organizer-top">
-            <button class="mm-btn mm-btn-back mm-back-dashboard"><span aria-hidden="true">&larr;</span> Back</button>
-            <div>
-              <div class="mm-organizer-title">${esc(eventLabel(evt))}</div>
-              <div class="mm-organizer-subtitle">No heats were returned for this event.</div>
-            </div>
-          </div>
+          ${renderOrganizerTop(evt, 'No heats were returned for this event.')}
         </div>
       `;
-      el.querySelector('.mm-back-dashboard')?.addEventListener('click', () => renderDashboard());
+      wireOrganizerTopHandlers(el);
       return;
     }
 
@@ -2051,13 +2455,7 @@
 
     el.innerHTML = `
       <div class="mm-organizer">
-        <div class="mm-organizer-top">
-          <button class="mm-btn mm-btn-back mm-back-dashboard"><span aria-hidden="true">&larr;</span> Back</button>
-          <div>
-            <div class="mm-organizer-title">${esc(eventLabel(evt))}</div>
-            <div class="mm-organizer-subtitle">${records.length} entries across ${heats.length} heat${heats.length === 1 ? '' : 's'}. Drag a swimmer to another lane to reseat within this event.</div>
-          </div>
-        </div>
+        ${renderOrganizerTop(evt, `${records.length} entries across ${heats.length} heat${heats.length === 1 ? '' : 's'}. Drag a swimmer to another lane to reseat within this event.`)}
         <div class="mm-organizer-legend">
           <span class="mm-legend-chip mm-swimmer-boy"></span> Boys
           <span class="mm-legend-chip mm-swimmer-girl"></span> Girls
@@ -2087,8 +2485,12 @@
             <span>Use the selected heat order; fastest in each heat gets the preferred center lane.</span>
           </div>
           <div>
-            <button class="mm-btn mm-btn-secondary mm-group-gender">Group Boys / Girls</button>
-            <span>Use the selected heat order and fewest heats possible, then keep heats single-gender where possible. Mixed heats put girls on low lanes and boys on high lanes.</span>
+            <button class="mm-btn mm-btn-secondary mm-group-gender-minimized">Minimize Combined Heats</button>
+            <span>Use one slow combined heat when possible; all other heats stay boys-only or girls-only and use standard lane seeding.</span>
+          </div>
+          <div>
+            <button class="mm-btn mm-btn-secondary mm-group-gender-balanced">Balance Combined Heats</button>
+            <span>Use the first two slow heats as combined heats when possible, with boys and girls split to opposite lane sides.</span>
           </div>
           <div>
             <button class="mm-btn mm-btn-secondary mm-group-age">Group Age Groups</button>
@@ -2102,10 +2504,11 @@
       </div>
     `;
 
-    el.querySelector('.mm-back-dashboard')?.addEventListener('click', () => renderDashboard());
+    wireOrganizerTopHandlers(el);
     el.querySelector('.mm-sort-time')?.addEventListener('click', event => organizeByTime(eventId, event.currentTarget));
     el.querySelector('.mm-page-reload')?.addEventListener('click', () => requestPageReload());
-    el.querySelector('.mm-group-gender')?.addEventListener('click', event => organizeByGender(eventId, event.currentTarget));
+    el.querySelector('.mm-group-gender-minimized')?.addEventListener('click', event => organizeByGender(eventId, event.currentTarget, 'minimize'));
+    el.querySelector('.mm-group-gender-balanced')?.addEventListener('click', event => organizeByGender(eventId, event.currentTarget, 'balanced'));
     el.querySelector('.mm-group-age')?.addEventListener('click', event => organizeByAgeGroup(eventId, event.currentTarget));
     el.querySelectorAll('.mm-segmented-btn').forEach(button => {
       button.addEventListener('click', () => {
@@ -2402,17 +2805,23 @@
           record.id,
           { heatId, heatNumber, laneNumber },
         ]));
-        await applyOrganizerAssignmentsSafely(eventId, a, assignments, targetByRecordId, null, 'Swapping occupied lanes...');
+        await applyOrganizerAssignmentsSafely(eventId, a, assignments, targetByRecordId, null, 'Swapping occupied lanes...', {
+          onProgress({ completed, total, message }) {
+            setBusyProgress(completed, total, message || 'Swapping occupied lanes...');
+          },
+        });
       } else {
-        setBusyMessage('Saving lane change...');
+        setBusyProgress(0, 1, 'Saving lane change...');
         await a.moveEventRecord(sourceRecord.id, {
           heatId: targetHeatId,
           heatNumber: targetHeatNumber,
           laneNumber: targetLane,
           isExhibition: !!sourceRecord.attributes?.isExhibition,
         });
+        setBusyProgress(1, 1, 'Saved lane change...');
       }
 
+      clearBusyProgress();
       await nudgeMeetMaestroView(a, [eventId]);
       setBusyMessage('Refreshing meet data...');
       await loadData();
@@ -2641,11 +3050,11 @@
     await applyOrganizerAssignments(eventId, assignments, button, 'Sorting...');
   }
 
-  async function organizeByGender(eventId, button) {
+  async function organizeByGender(eventId, button, mode = 'minimize') {
     const heats = heatsFor(eventId);
     const records = recordsFor(eventId);
     const laneTotal = requireLaneCount();
-    const chunks = planGenderHeatChunks(records, laneTotal);
+    const chunks = planGenderHeatChunks(records, laneTotal, organizerHeatOrder, mode);
     const targetHeats = heats.slice(0, chunks.length);
 
     if (targetHeats.length < chunks.length) {
@@ -2722,7 +3131,12 @@
     }
 
     try {
-      await applyOrganizerAssignmentsSafely(eventId, a, assignments, targetByRecordId, button, savingLabel);
+      await applyOrganizerAssignmentsSafely(eventId, a, assignments, targetByRecordId, button, savingLabel, {
+        onProgress({ completed, total, message }) {
+          setBusyProgress(completed, total, message || savingLabel);
+        },
+      });
+      clearBusyProgress();
       await nudgeMeetMaestroView(a, [eventId]);
       setBusyMessage('Refreshing meet data...');
       await loadData();
@@ -2738,7 +3152,7 @@
     }
   }
 
-  async function applyOrganizerAssignmentsSafely(eventId, a, assignments, targetByRecordId, button, savingLabel) {
+  async function applyOrganizerAssignmentsSafely(eventId, a, assignments, targetByRecordId, button, savingLabel, options = {}) {
     const eventRecords = recordsFor(eventId);
     const recordById = new Map(eventRecords.map(record => [record.id, record]));
     const currentByRecordId = new Map();
@@ -2757,6 +3171,16 @@
         .filter(({ record }) => !sameSlot(currentByRecordId.get(record.id), targetByRecordId.get(record.id)))
         .map(({ record }) => record.id)
     );
+    let completedMoves = 0;
+    const reportProgress = (message = savingLabel) => {
+      if (typeof options.onProgress !== 'function') return;
+      options.onProgress({
+        completed: completedMoves,
+        total: Math.max(1, completedMoves + pending.size),
+        message,
+      });
+    };
+    reportProgress(savingLabel);
 
     let scratchSlot = findEmptyNonFinalSlot(eventId, occupancy, finalSlotKeys);
     let scratchCreated = false;
@@ -2774,6 +3198,8 @@
         const record = recordById.get(recordId);
         await moveOrganizerRecord(a, record, target, occupancy, currentByRecordId);
         if (sameSlot(currentByRecordId.get(recordId), target)) pending.delete(recordId);
+        completedMoves++;
+        reportProgress(`Moved ${completedMoves} swimmer${completedMoves === 1 ? '' : 's'}...`);
         moved = true;
         break;
       }
@@ -2814,6 +3240,8 @@
       }
       const record = recordById.get(recordId);
       await moveOrganizerRecord(a, record, scratchSlot, occupancy, currentByRecordId);
+      completedMoves++;
+      reportProgress(`Moved ${completedMoves} swimmer${completedMoves === 1 ? '' : 's'}...`);
     }
 
     if (scratchCreated) {
@@ -3128,8 +3556,13 @@
     }
 
     try {
-      setBusyMessage(`Moving ${moves.length} swimmer${moves.length === 1 ? '' : 's'} into the target event...`);
-      const results = await a.batchMove(moves);
+      setBusyProgress(0, moves.length, `Moving ${moves.length} swimmer${moves.length === 1 ? '' : 's'} into the target event...`);
+      const results = await a.batchMove(moves, {
+        onProgress({ completed, total }) {
+          setBusyProgress(completed, total, `Moved ${completed} of ${total} swimmer${total === 1 ? '' : 's'} into the target event...`);
+        },
+      });
+      clearBusyProgress();
       const failures = results.filter(r => !r.success);
       rememberOriginalAgeGroupsForMovedRecords(results, opp.targetEvent.id);
       const changedEventIds = cleanupEventIdsForMerge(opp);
