@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Meet Maestro Merge Helper",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Improved interface for merging events and heats in Meet Maestro",
   "permissions": [
     "activeTab",
@@ -10,6 +10,7 @@
   ],
   "host_permissions": [
     "https://maestro.swimtopia.com/*",
+    "https://*.swimtopia.com/*",
     "https://api.swimtopia.org/*"
   ],
   "action": {
@@ -27,6 +28,12 @@
     {
       "matches": ["https://maestro.swimtopia.com/*"],
       "js": ["lib/api.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.swimtopia.com/manage/reports/*"],
+      "js": ["swimtopia-content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

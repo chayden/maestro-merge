@@ -18,16 +18,18 @@ const packageName = `meet-maestro-merge-helper-${manifest.version || 'dev'}.zip`
 const packagePath = join(distDir, packageName);
 const unpackedDir = join(distDir, 'unpacked');
 
-const files = [
-  'manifest.json',
-  'background.js',
-  'content.css',
-  'content.js',
-  'lib/api.js',
-  'icons/icon16.png',
-  'icons/icon48.png',
-  'icons/icon128.png',
+const contentScriptFiles = (manifest.content_scripts || [])
+  .flatMap(contentScript => [...(contentScript.js || []), ...(contentScript.css || [])]);
+const iconFiles = [
+  ...Object.values(manifest.icons || {}),
+  ...Object.values(manifest.action?.default_icon || {}),
 ];
+const files = Array.from(new Set([
+  'manifest.json',
+  manifest.background?.service_worker,
+  ...contentScriptFiles,
+  ...iconFiles,
+].filter(Boolean)));
 
 const missing = files.filter(file => !existsSync(join(root, file)));
 if (missing.length > 0) {

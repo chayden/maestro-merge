@@ -17,6 +17,17 @@
   box-shadow: -4px 0 24px rgba(0, 0, 0, 0.6);
 }
 
+html.mm-merge-helper-panel-open,
+body.mm-merge-helper-panel-open {
+  width: calc(100vw - var(--mm-panel-width, 540px));
+  max-width: calc(100vw - var(--mm-panel-width, 540px));
+  overflow-x: hidden;
+}
+
+body.mm-merge-helper-panel-open > *:not(#mm-panel) {
+  max-width: calc(100vw - var(--mm-panel-width, 540px)) !important;
+}
+
 .mm-busy-overlay {
   position: absolute;
   inset: 0;
@@ -119,12 +130,19 @@
 /* Header */
 .mm-header {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  gap: 10px;
   padding: 14px 18px;
   background: #151a23;
   border-bottom: 1px solid #26384f;
   flex-shrink: 0;
+}
+
+.mm-header-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .mm-header h2 {
@@ -143,6 +161,11 @@
 .mm-header-actions {
   display: flex;
   gap: 6px;
+  flex-shrink: 0;
+}
+
+.mm-header-mode {
+  width: 100%;
 }
 
 /* Summary bar */
@@ -224,6 +247,67 @@
   background: #121923;
   border: 1px solid #26384f;
   border-radius: 6px;
+}
+
+.mm-mode-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 12px;
+  background: #121923;
+  border: 1px solid #26384f;
+  border-radius: 6px;
+}
+
+.mm-header-mode .mm-mode-bar {
+  margin-bottom: 0;
+  padding: 9px 10px;
+}
+
+.mm-mode-bar.is-edit-mode {
+  border-color: #4a6742;
+  background: #131d19;
+}
+
+.mm-mode-bar:not(.is-edit-mode) {
+  border-color: #315572;
+  background: #111923;
+}
+
+.mm-mode-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mm-mode-label strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #e7eef8;
+  font-size: 13px;
+}
+
+.mm-mode-button-icon {
+  flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.mm-edit-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mm-mode-label span {
+  color: #8190a3;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .mm-dashboard-tabs {
@@ -1332,4 +1416,146 @@
 
 .mm-dragging {
   opacity: 0.5;
+}
+
+/* Meet Maestro top navigation button */
+.mm-nav-button {
+  height: 32px;
+  margin: 0 4px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  cursor: pointer;
+  font: 600 12px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.mm-nav-button:hover {
+  border-color: rgba(255, 255, 255, 0.44);
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.mm-nav-button:focus-visible {
+  outline: 2px solid #8ed3f1;
+  outline-offset: 2px;
+}
+
+.st-clear-times-button {
+  position: fixed;
+  right: 20px;
+  bottom: 100px;
+  z-index: 99998;
+  min-width: 108px;
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid #4a88b0;
+  border-radius: 6px;
+  background: #3a78a0;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  font: 700 12px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.st-clear-times-button:hover:not(:disabled) {
+  border-color: #6aa6c8;
+  background: #4a88b0;
+}
+
+.st-clear-times-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.st-clear-times-button:focus-visible {
+  outline: 2px solid #8ed3f1;
+  outline-offset: 2px;
+}
+
+/* ========================================
+   Mixed Heats List Styles
+   ======================================== */
+
+.mm-mixed-heats-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.mm-mixed-heat-item {
+  display: flex;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #1a2130;
+  border: 1px solid #2d3e52;
+  border-radius: 6px;
+  transition: border-color 0.15s ease;
+}
+
+.mm-mixed-heat-item:hover {
+  border-color: #3a78a0;
+}
+
+.mm-mixed-heat-checkbox {
+  display: flex;
+  align-items: flex-start;
+  padding-top: 2px;
+}
+
+.mm-mixed-heat-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.mm-mixed-heat-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.mm-mixed-heat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.mm-mixed-heat-header strong {
+  font-size: 13px;
+  font-weight: 700;
+  color: #e8eef7;
+}
+
+.mm-mixed-heat-header span {
+  font-size: 11px;
+  font-weight: 600;
+  color: #7c8ba0;
+  white-space: nowrap;
+}
+
+.mm-mixed-heat-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  color: #a9bdcf;
+}
+
+.mm-place-info {
+  color: #fbbf24 !important;
+  font-weight: 500;
+}
+
+.mm-mixed-heats-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding-top: 8px;
+  border-top: 1px solid #2d3e52;
 }

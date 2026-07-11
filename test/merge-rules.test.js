@@ -95,16 +95,30 @@ function record(eventId, index, laneCount, overrides = {}) {
   const {
     gender,
     seedTimeInt = 1000 + index,
+    resultTimeInt,
+    officialTimeInt,
+    judgedHeatPlace,
+    heatPlace,
+    calculatedHeatPlace,
+    ...attributeOverrides
   } = overrides;
   const heatNumber = Math.floor(index / laneCount) + 1;
   const laneNumber = (index % laneCount) + 1;
   const athleteId = gender ? `${eventId}-athlete-${index + 1}` : undefined;
+  const attributes = {
+    laneNumber,
+    seedTimeInt,
+    ...attributeOverrides,
+  };
+  if (resultTimeInt !== undefined) attributes.resultTimeInt = resultTimeInt;
+  if (officialTimeInt !== undefined) attributes.officialTimeInt = officialTimeInt;
+  if (judgedHeatPlace !== undefined) attributes.judgedHeatPlace = judgedHeatPlace;
+  if (heatPlace !== undefined) attributes.heatPlace = heatPlace;
+  if (calculatedHeatPlace !== undefined) attributes.calculatedHeatPlace = calculatedHeatPlace;
+
   return {
     id: `${eventId}-record-${index + 1}`,
-    attributes: {
-      laneNumber,
-      seedTimeInt,
-    },
+    attributes,
     relationships: {
       event: { data: { id: eventId } },
       heat: { data: { id: `${eventId}-heat-${heatNumber}` } },
@@ -145,6 +159,18 @@ function seededGenderedMeetRecords(eventId, laneCount, entries) {
   const records = entries.map((entry, index) => record(eventId, index, laneCount, {
     gender: entry.gender,
     seedTimeInt: entry.seedTimeInt,
+    resultTimeInt: entry.resultTimeInt,
+    officialTimeInt: entry.officialTimeInt,
+    judgedHeatPlace: entry.judgedHeatPlace,
+    heatPlace: entry.heatPlace,
+    calculatedHeatPlace: entry.calculatedHeatPlace,
+    isDq: entry.isDq,
+    isExhibition: entry.isExhibition,
+    isAlternate: entry.isAlternate,
+    isInvalid: entry.isInvalid,
+    isNonPlacing: entry.isNonPlacing,
+    laneIsNonPlacing: entry.laneIsNonPlacing,
+    heatIsNonPlacing: entry.heatIsNonPlacing,
   }));
   const athletes = entries.map((entry, index) => ({
     id: `${eventId}-athlete-${index + 1}`,
@@ -590,6 +616,247 @@ test('mixed gender award summaries list boys and girls in populated mixed target
   assert.match(report, /#1A 7-8 Freestyle/);
   assert.match(report, /  Heat 1\n  Boys\n    L2  Ben  10\.20\n    L3  Cam  10\.30\n  Girls\n    L1  Alice  10\.10\n    L4  Dana  10\.40/);
   assert.match(report, /  Heat 2\n  Boys\n    L1  Eli  10\.50\n    L2  Finn  10\.60\n  Girls\n    L3  Gia  10\.70\n    L4  Hope  10\.80/);
+});
+
+test('mixed heat place assignment candidates require result times and missing per-gender places', () => {
+  const harness = loadMergeTestHarness();
+  const target = meetEvent('mixed-target', { number: '1A', gender: 'X' });
+  const mixedRecords = seededGenderedMeetRecords(target.id, 4, [
+    { gender: 'F', resultTimeInt: 1000, judgedHeatPlace: 1 },
+    { gender: 'M', resultTimeInt: 1100, judgedHeatPlace: 2 },
+    { gender: 'F', resultTimeInt: 1200, judgedHeatPlace: 3 },
+    { gender: 'M', resultTimeInt: 1300, judgedHeatPlace: 4 },
+  ]);
+
+  harness.setData({
+    events: [target],
+    records: mixedRecords.records,
+    athletes: mixedRecords.athletes,
+    heats: [heat(target.id, 1)],
+    laneCount: 4,
+  });
+
+  const candidates = harness.findMixedHeatsNeedingPlaceAssignment();
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].heatId, `${target.id}-heat-1`);
+  assert.deepEqual(candidates[0].malePlaces, [2, 4]);
+  assert.deepEqual(candidates[0].femalePlaces, [1, 3]);
+
+  const updates = harness.placeUpdatesForMixedHeat(mixedRecords.records)
+    .map(update => [update.record.id, update.judgedHeatPlace]);
+  assert.deepEqual(updates, [
+    [`${target.id}-record-2`, 1],
+    [`${target.id}-record-4`, 2],
+    [`${target.id}-record-1`, 1],
+    [`${target.id}-record-3`, 2],
+  ]);
+});
+
+test('mixed heat place assignment candidates use effective heatPlace when judgedHeatPlace is empty', () => {
+  const harness = loadMergeTestHarness();
+  const target = meetEvent('mixed-target', { number: '1A', gender: 'X' });
+  const mixedRecords = seededGenderedMeetRecords(target.id, 4, [
+    { gender: 'F', resultTimeInt: 1000, heatPlace: 1 },
+    { gender: 'F', resultTimeInt: 1100, heatPlace: 2 },
+    { gender: 'M', resultTimeInt: 1200, heatPlace: 5 },
+    { gender: 'M', resultTimeInt: 1300, heatPlace: 6 },
+  ]);
+
+  harness.setData({
+    events: [target],
+    records: mixedRecords.records,
+    athletes: mixedRecords.athletes,
+    heats: [heat(target.id, 1)],
+    laneCount: 4,
+  });
+
+  const candidates = harness.findMixedHeatsNeedingPlaceAssignment();
+  assert.equal(candidates.length, 1);
+  assert.deepEqual(candidates[0].malePlaces, [5, 6]);
+  assert.deepEqual(candidates[0].femalePlaces, [1, 2]);
+
+  assert.deepEqual(
+    harness.placeUpdatesForMixedHeat(mixedRecords.records)
+      .map(update => [update.record.id, update.judgedHeatPlace]),
+    [
+      [`${target.id}-record-3`, 1],
+      [`${target.id}-record-4`, 2],
+      [`${target.id}-record-1`, 1],
+      [`${target.id}-record-2`, 2],
+    ],
+  );
+});
+
+test('mixed heat place assignment preserves ties within each gender', () => {
+  const harness = loadMergeTestHarness();
+  const target = meetEvent('mixed-target', { number: '1A', gender: 'X' });
+  const mixedRecords = seededGenderedMeetRecords(target.id, 6, [
+    { gender: 'F', resultTimeInt: 1000, judgedHeatPlace: 1 },
+    { gender: 'M', resultTimeInt: 1100, judgedHeatPlace: 2 },
+    { gender: 'F', resultTimeInt: 1000, judgedHeatPlace: 3 },
+    { gender: 'M', resultTimeInt: 1100, judgedHeatPlace: 4 },
+    { gender: 'F', resultTimeInt: 1200, judgedHeatPlace: 5 },
+    { gender: 'M', resultTimeInt: 1300, judgedHeatPlace: 6 },
+  ]);
+
+  harness.setData({
+    events: [target],
+    records: mixedRecords.records,
+    athletes: mixedRecords.athletes,
+    heats: [heat(target.id, 1)],
+    laneCount: 6,
+  });
+
+  assert.equal(harness.findMixedHeatsNeedingPlaceAssignment().length, 1);
+  assert.deepEqual(
+    harness.placeUpdatesForMixedHeat(mixedRecords.records)
+      .map(update => [update.record.id, update.judgedHeatPlace]),
+    [
+      [`${target.id}-record-2`, 1],
+      [`${target.id}-record-4`, 1],
+      [`${target.id}-record-6`, 3],
+      [`${target.id}-record-1`, 1],
+      [`${target.id}-record-3`, 1],
+      [`${target.id}-record-5`, 3],
+    ],
+  );
+});
+
+test('mixed heat place assignment candidates skip already-separated ties', () => {
+  const harness = loadMergeTestHarness();
+  const target = meetEvent('mixed-target', { number: '1A', gender: 'X' });
+  const mixedRecords = seededGenderedMeetRecords(target.id, 6, [
+    { gender: 'F', resultTimeInt: 1000, judgedHeatPlace: 1 },
+    { gender: 'M', resultTimeInt: 1100, judgedHeatPlace: 1 },
+    { gender: 'F', resultTimeInt: 1000, judgedHeatPlace: 1 },
+    { gender: 'M', resultTimeInt: 1100, judgedHeatPlace: 1 },
+    { gender: 'F', resultTimeInt: 1200, judgedHeatPlace: 3 },
+    { gender: 'M', resultTimeInt: 1300, judgedHeatPlace: 3 },
+  ]);
+
+  harness.setData({
+    events: [target],
+    records: mixedRecords.records,
+    athletes: mixedRecords.athletes,
+    heats: [heat(target.id, 1)],
+    laneCount: 6,
+  });
+
+  assert.deepEqual(harness.findMixedHeatsNeedingPlaceAssignment(), []);
+});
+
+test('mixed heat place assignment candidates skip unscored or already-separated heats', () => {
+  const harness = loadMergeTestHarness();
+  const unscored = meetEvent('unscored-mixed', { number: '1', gender: 'X' });
+  const separated = meetEvent('separated-mixed', { number: '2', gender: 'X' });
+  const boysOnly = meetEvent('boys-only', { number: '3', gender: 'M' });
+  const unscoredRecords = seededGenderedMeetRecords(unscored.id, 4, [
+    { gender: 'F', seedTimeInt: 1000, judgedHeatPlace: 1 },
+    { gender: 'M', seedTimeInt: 1100, judgedHeatPlace: 2 },
+  ]);
+  const separatedRecords = seededGenderedMeetRecords(separated.id, 4, [
+    { gender: 'F', resultTimeInt: 1000, judgedHeatPlace: 1 },
+    { gender: 'M', resultTimeInt: 1100, judgedHeatPlace: 1 },
+    { gender: 'F', resultTimeInt: 1200, judgedHeatPlace: 2 },
+    { gender: 'M', resultTimeInt: 1300, judgedHeatPlace: 2 },
+  ]);
+  const boysRecords = seededGenderedMeetRecords(boysOnly.id, 4, [
+    { gender: 'M', resultTimeInt: 1000, judgedHeatPlace: 1 },
+    { gender: 'M', resultTimeInt: 1100, judgedHeatPlace: 2 },
+  ]);
+
+  harness.setData({
+    events: [unscored, separated, boysOnly],
+    records: [...unscoredRecords.records, ...separatedRecords.records, ...boysRecords.records],
+    athletes: [...unscoredRecords.athletes, ...separatedRecords.athletes, ...boysRecords.athletes],
+    heats: [heat(unscored.id, 1), heat(separated.id, 1), heat(boysOnly.id, 1)],
+    laneCount: 4,
+  });
+
+  assert.deepEqual(harness.findMixedHeatsNeedingPlaceAssignment(), []);
+});
+
+test('mixed heat place assignment candidates are evaluated per heat within an event', () => {
+  const harness = loadMergeTestHarness();
+  const target = meetEvent('mixed-target', { number: '1A', gender: 'X' });
+  const targetRecords = seededGenderedMeetRecords(target.id, 4, [
+    { gender: 'F', resultTimeInt: 1000, judgedHeatPlace: 1 },
+    { gender: 'M', resultTimeInt: 1100, judgedHeatPlace: 2 },
+    { gender: 'F', resultTimeInt: 1200, judgedHeatPlace: 3 },
+    { gender: 'M', resultTimeInt: 1300, judgedHeatPlace: 4 },
+    { gender: 'F', resultTimeInt: 2000, judgedHeatPlace: 1 },
+    { gender: 'M', resultTimeInt: 2100, judgedHeatPlace: 1 },
+    { gender: 'F', resultTimeInt: 2200, judgedHeatPlace: 2 },
+    { gender: 'M', resultTimeInt: 2300, judgedHeatPlace: 2 },
+  ]);
+
+  harness.setData({
+    events: [target],
+    records: targetRecords.records,
+    athletes: targetRecords.athletes,
+    heats: [heat(target.id, 1), heat(target.id, 2)],
+    laneCount: 4,
+  });
+
+  const candidates = harness.findMixedHeatsNeedingPlaceAssignment();
+  assert.deepEqual(candidates.map(candidate => candidate.heatNumber), [1]);
+});
+
+test('mixed heat place assignment ignores records that cannot receive a place', () => {
+  const harness = loadMergeTestHarness();
+  const target = meetEvent('mixed-target', { number: '1A', gender: 'X' });
+  const mixedRecords = seededGenderedMeetRecords(target.id, 6, [
+    { gender: 'F', resultTimeInt: 1000, judgedHeatPlace: 1 },
+    { gender: 'M', resultTimeInt: 1100, judgedHeatPlace: 2 },
+    { gender: 'F', resultTimeInt: 1200, judgedHeatPlace: 3 },
+    { gender: 'M', resultTimeInt: 1300, judgedHeatPlace: 4 },
+    { gender: 'M', resultTimeInt: 500, judgedHeatPlace: 5, isDq: true },
+    { gender: 'F', resultTimeInt: 600, judgedHeatPlace: 6, isExhibition: true },
+  ]);
+
+  harness.setData({
+    events: [target],
+    records: mixedRecords.records,
+    athletes: mixedRecords.athletes,
+    heats: [heat(target.id, 1)],
+    laneCount: 6,
+  });
+
+  const candidates = harness.findMixedHeatsNeedingPlaceAssignment();
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].boyCount, 2);
+  assert.equal(candidates[0].girlCount, 2);
+  assert.deepEqual(
+    harness.placeUpdatesForMixedHeat(mixedRecords.records)
+      .map(update => [update.record.id, update.judgedHeatPlace]),
+    [
+      [`${target.id}-record-2`, 1],
+      [`${target.id}-record-4`, 2],
+      [`${target.id}-record-1`, 1],
+      [`${target.id}-record-3`, 2],
+    ],
+  );
+});
+
+test('mixed heat place assignment skips non-placing heats', () => {
+  const harness = loadMergeTestHarness();
+  const target = meetEvent('mixed-target', { number: '1A', gender: 'X' });
+  const mixedRecords = seededGenderedMeetRecords(target.id, 2, [
+    { gender: 'F', resultTimeInt: 1000, judgedHeatPlace: 1 },
+    { gender: 'M', resultTimeInt: 1100, judgedHeatPlace: 2 },
+  ]);
+  const nonPlacingHeat = heat(target.id, 1);
+  nonPlacingHeat.attributes.isNonPlacing = true;
+
+  harness.setData({
+    events: [target],
+    records: mixedRecords.records,
+    athletes: mixedRecords.athletes,
+    heats: [nonPlacingHeat],
+    laneCount: 2,
+  });
+
+  assert.deepEqual(harness.findMixedHeatsNeedingPlaceAssignment(), []);
 });
 
 test('gender organizer preserves fastest donor swimmers together after filling a mixed heat', () => {
