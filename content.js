@@ -27,6 +27,8 @@
   let currentView = 'dashboard';
   let organizerEventId = null;
   let dashboardOpportunityTab = null;
+  let editMeetMode = false;
+  let scoredMeetUnlockConfirmed = false;
   let operationDepth = 0;
   let organizerLabelMode = 'initials';
   let organizerHeatOrder = 'slowest-first';
@@ -35,6 +37,7 @@
   const meetMaestroRefreshReadDelayMs = 250;
   const reloadRestoreKey = 'mmMergeHelperRestoreAfterReload';
   const originalAgeGroupStoragePrefix = 'mmMergeHelperOriginalAgeGroups:v1';
+  const panelOpenClass = 'mm-merge-helper-panel-open';
 
   // ---- Auth & meet ID detection ----
 
@@ -55,6 +58,31 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  function syncPageInsetForPanel() {
+    if (!mergePanel) return;
+    const width = mergePanel.offsetWidth || 540;
+    document.documentElement.style.setProperty('--mm-panel-width', `${width}px`);
+    document.body.style.setProperty('--mm-panel-width', `${width}px`);
+  }
+
+  function setPanelVisibility(visible) {
+    if (!mergePanel) return;
+
+    mergePanel.style.display = visible ? 'flex' : 'none';
+    panelVisible = visible;
+
+    document.documentElement.classList.toggle(panelOpenClass, visible);
+    document.body.classList.toggle(panelOpenClass, visible);
+    if (visible) syncPageInsetForPanel();
+    if (!visible) {
+      scoredMeetUnlockConfirmed = false;
+      editMeetMode = false;
+      currentView = 'dashboard';
+      organizerEventId = null;
+      dashboardOpportunityTab = null;
+    }
+  }
+
   function readReloadRestoreState() {
     try {
       const raw = window.sessionStorage?.getItem(reloadRestoreKey);
@@ -72,6 +100,7 @@
       window.sessionStorage?.setItem(reloadRestoreKey, JSON.stringify({
         view: currentView,
         organizerEventId,
+        editMeetMode,
       }));
     } catch (err) {
       console.debug('[Merge Helper] reload restore write failed:', err);
@@ -86,6 +115,8 @@
     appliedMerges = new Set();
     hiddenOpportunities = new Set();
     needsOrganizationEventIds = new Set();
+    scoredMeetUnlockConfirmed = false;
+    editMeetMode = false;
     if (panelVisible && mergePanel) {
       withBusy('Loading meet data...', () => loadData()).catch(() => {});
     }
@@ -191,12 +222,10 @@
 
   function togglePanel() {
     if (panelVisible && mergePanel) {
-      mergePanel.style.display = 'none';
-      panelVisible = false;
+      setPanelVisibility(false);
     } else {
       buildPanel();
-      mergePanel.style.display = 'flex';
-      panelVisible = true;
+      setPanelVisibility(true);
       withBusy('Loading meet data...', () => loadData()).catch(() => {});
     }
   }
@@ -220,6 +249,7 @@
       allTeams = data.teams || [];
       updateLaneCountFromMeet(data);
       dashboardOpportunityTab = null;
+      enforceLockedModeForScoredMeet();
       if (currentView === 'organizer' && organizerEventId) {
         renderOrganizer(organizerEventId);
       } else {
@@ -521,6 +551,98 @@
   function seedSortValue(record) {
     const time = record.attributes?.seedTimeInt;
     return time === null || time === undefined ? Infinity : Number(time);
+  }
+
+  function hasValue(value) {
+    return value !== null && value !== undefined;
+  }
+
+  function numericAttribute(attrs, key) {
+    if (!hasValue(attrs?.[key])) return null;
+    const value = Number(attrs[key]);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function recordResultTimeInt(record) {
+    const attrs = record.attributes || {};
+    const directTime = numericAttribute(attrs, 'officialTimeInt') ??
+      numericAttribute(attrs, 'resultTimeInt') ??
+      numericAttribute(attrs, 'automaticTimeInt') ??
+      numericAttribute(attrs, 'watch1TimeInt') ??
+      numericAttribute(attrs, 'watch2TimeInt') ??
+      numericAttribute(attrs, 'watch3TimeInt');
+    if (directTime !== null) return directTime;
+
+    if (!attrs.doIgnoreBackup1Time) {
+      const backup = numericAttribute(attrs, 'backup1TimeInt');
+      if (backup !== null) return backup;
+    }
+    if (!attrs.doIgnoreBackup2Time) {
+      const backup = numericAttribute(attrs, 'backup2TimeInt');
+      if (backup !== null) return backup;
+    }
+    if (!attrs.doIgnoreBackup3Time) {
+      const backup = numericAttribute(attrs, 'backup3TimeInt');
+      if (backup !== null) return backup;
+    }
+
+    return null;
+  }
+
+  function hasResultTime(record) {
+    return recordResultTimeInt(record) !== null;
+  }
+
+  function anyMeetResultTimesAvailable() {
+    return allRecords.some(hasResultTime);
+  }
+
+  function enforceLockedModeForScoredMeet() {
+    if (!anyMeetResultTimesAvailable() || scoredMeetUnlockConfirmed) return;
+    editMeetMode = false;
+    if (currentView === 'organizer') {
+      currentView = 'dashboard';
+      organizerEventId = null;
+    }
+    if (!['mixed-heats', 'awards'].includes(dashboardOpportunityTab)) {
+      dashboardOpportunityTab = 'mixed-heats';
+    }
+  }
+
+  function resultSortValue(record) {
+    const time = recordResultTimeInt(record);
+    return time === null ? Infinity : time;
+  }
+
+  function compareResultFastestFirst(a, b) {
+    const timeDiff = resultSortValue(a) - resultSortValue(b);
+    if (timeDiff !== 0) return timeDiff;
+    const laneDiff = Number(a.attributes?.laneNumber || 0) - Number(b.attributes?.laneNumber || 0);
+    if (laneDiff !== 0) return laneDiff;
+    return compareByName(a, b);
+  }
+
+  function recordHeatPlace(record) {
+    const attrs = record.attributes || {};
+    return numericAttribute(attrs, 'judgedHeatPlace') ??
+      numericAttribute(attrs, 'heatPlace') ??
+      numericAttribute(attrs, 'calculatedHeatPlace');
+  }
+
+  function hasHeatPlace(record) {
+    return recordHeatPlace(record) !== null;
+  }
+
+  function isEligibleForHeatPlace(record) {
+    const attrs = record.attributes || {};
+    return ['M', 'F'].includes(athleteGender(record)) &&
+      !attrs.isDq &&
+      !attrs.isExhibition &&
+      !attrs.isAlternate &&
+      !attrs.isInvalid &&
+      !attrs.isNonPlacing &&
+      !attrs.laneIsNonPlacing &&
+      !attrs.heatIsNonPlacing;
   }
 
   function compareByName(a, b) {
@@ -1345,6 +1467,107 @@
     return lines.join('\n');
   }
 
+  /**
+   * Find heats that have mixed genders and heat places that do not match
+   * per-gender result order within that heat.
+   * Only includes heats where:
+   * - The heat is mixed gender (has both boys and girls)
+   * - Result times are available for all boys and girls in the heat
+   * - Heat places are already set for all boys and girls in the heat
+   * - Places are NOT already separated by gender
+   */
+  function findMixedHeatsNeedingPlaceAssignment() {
+    const mixedHeats = [];
+
+    allEvents.forEach(evt => {
+      const heats = heatsFor(evt.id);
+      if (heats.length === 0) return;
+
+      heats.forEach(heat => {
+        const summary = mixedHeatPlaceAssignmentSummary(evt, heat);
+        if (summary?.needsAssignment) {
+          mixedHeats.push({
+            ...summary,
+            eventLabel: eventLabel(evt),
+            raceLabel: raceLabel(evt),
+          });
+        }
+      });
+    });
+
+    return mixedHeats.sort((a, b) => {
+      // Sort by event sort, then by heat number
+      const aSort = eventSortValue(a.eventId) ?? Number.MAX_SAFE_INTEGER;
+      const bSort = eventSortValue(b.eventId) ?? Number.MAX_SAFE_INTEGER;
+      if (aSort !== bSort) return aSort - bSort;
+      return a.heatNumber - b.heatNumber;
+    });
+  }
+
+  function mixedHeatPlaceAssignmentSummary(evt, heat) {
+    const heatRecords = recordsFor(evt.id).filter(r => r.relationships?.heat?.data?.id === heat.id);
+    if (heatRecords.length === 0) return null;
+    if (heat.attributes?.isNonPlacing || heat.attributes?.isPlacing === false) return null;
+
+    const eligibleRecords = heatRecords.filter(isEligibleForHeatPlace);
+    const maleRecords = eligibleRecords.filter(r => athleteGender(r) === 'M');
+    const femaleRecords = eligibleRecords.filter(r => athleteGender(r) === 'F');
+    if (maleRecords.length === 0 || femaleRecords.length === 0) return null;
+
+    if (!eligibleRecords.every(hasResultTime)) return null;
+    if (!eligibleRecords.every(hasHeatPlace)) return null;
+
+    const expectedUpdates = placeUpdatesForMixedHeat(eligibleRecords);
+    const needsAssignment = expectedUpdates.some(({ record, judgedHeatPlace }) =>
+      recordHeatPlace(record) !== judgedHeatPlace
+    );
+    if (!needsAssignment) return null;
+
+    return {
+      eventId: evt.id,
+      heatId: heat.id,
+      heatNumber: heatNumberFor(heat, 'mixed heat'),
+      totalSwimmers: eligibleRecords.length,
+      boyCount: maleRecords.length,
+      girlCount: femaleRecords.length,
+      malePlaces: sortedHeatPlaces(maleRecords),
+      femalePlaces: sortedHeatPlaces(femaleRecords),
+      needsAssignment,
+    };
+  }
+
+  function sortedHeatPlaces(records) {
+    return records
+      .map(recordHeatPlace)
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+  }
+
+  function placeUpdatesForMixedHeat(heatRecords) {
+    const updates = [];
+
+    ['M', 'F'].forEach(gender => {
+      let lastResultTime = null;
+      let lastPlace = null;
+      let hasLastResult = false;
+
+      heatRecords
+        .filter(record => isEligibleForHeatPlace(record) && athleteGender(record) === gender)
+        .slice()
+        .sort(compareResultFastestFirst)
+        .forEach((record, index) => {
+          const resultTime = recordResultTimeInt(record);
+          const judgedHeatPlace = hasLastResult && resultTime === lastResultTime ? lastPlace : index + 1;
+          updates.push({ record, judgedHeatPlace, gender });
+          lastResultTime = resultTime;
+          lastPlace = judgedHeatPlace;
+          hasLastResult = true;
+        });
+    });
+
+    return updates;
+  }
+
   function targetCapacityFor(evt) {
     return heatsFor(evt.id).length * requireLaneCount();
   }
@@ -1864,6 +2087,9 @@
       findOpportunities,
       collectMixedGenderAwardSummaries,
       formatMixedGenderAwardReport,
+      findMixedHeatsNeedingPlaceAssignment,
+      placeUpdatesForMixedHeat,
+      isEligibleForHeatPlace,
       findSuggestedMergeTargets,
       filterSuggestedMergeTargetsByAgeGroupLimit,
       ageGroupSpanForSourceEvents,
@@ -1889,8 +2115,7 @@
 
   function buildPanel() {
     if (mergePanel) {
-      mergePanel.style.display = 'flex';
-      panelVisible = true;
+      setPanelVisibility(true);
       return;
     }
 
@@ -1898,14 +2123,17 @@
     mergePanel.id = 'mm-panel';
     mergePanel.innerHTML = `
       <div class="mm-header">
-        <div>
-          <h2>Meet Merge Helper</h2>
-          <div class="mm-header-subtitle">${meetId ? `Meet ${esc(meetId)}` : 'Meet'}${sessionId ? ` · Session ${esc(sessionId)}` : ''}</div>
+        <div class="mm-header-top">
+          <div>
+            <h2>Meet Merge Helper</h2>
+            <div class="mm-header-subtitle">${meetId ? `Meet ${esc(meetId)}` : 'Meet'}${sessionId ? ` · Session ${esc(sessionId)}` : ''}</div>
+          </div>
+          <div class="mm-header-actions">
+            <button class="mm-btn mm-btn-sm" id="mm-reload">Refresh Data</button>
+            <button class="mm-btn mm-btn-sm" id="mm-close">&times;</button>
+          </div>
         </div>
-        <div class="mm-header-actions">
-          <button class="mm-btn mm-btn-sm" id="mm-reload">Refresh Data</button>
-          <button class="mm-btn mm-btn-sm" id="mm-close">&times;</button>
-        </div>
+        <div id="mm-mode-slot" class="mm-header-mode"></div>
       </div>
       <div id="mm-summary" class="mm-summary"></div>
       <div id="mm-body" class="mm-body">
@@ -1926,10 +2154,10 @@
       </div>
     `;
     document.body.appendChild(mergePanel);
+    renderModeSelector();
 
     document.getElementById('mm-close').addEventListener('click', () => {
-      mergePanel.style.display = 'none';
-      panelVisible = false;
+      setPanelVisibility(false);
     });
     document.getElementById('mm-reload').addEventListener('click', () => {
       withBusy('Refreshing meet data...', () => loadData()).catch(() => {});
@@ -1939,11 +2167,14 @@
   function renderDashboard() {
     currentView = 'dashboard';
     organizerEventId = null;
-    const opportunities = findOpportunities();
-    const targetSuggestions = filterSuggestedMergeTargetsByAgeGroupLimit(findSuggestedMergeTargets());
-    if (!dashboardOpportunityTab) {
+    const opportunities = editMeetMode ? findOpportunities() : [];
+    const targetSuggestions = editMeetMode ? filterSuggestedMergeTargetsByAgeGroupLimit(findSuggestedMergeTargets()) : [];
+    if (!editMeetMode && !['mixed-heats', 'awards'].includes(dashboardOpportunityTab)) {
+      dashboardOpportunityTab = 'mixed-heats';
+    } else if (!dashboardOpportunityTab || dashboardOpportunityTab === 'mixed-heats') {
       dashboardOpportunityTab = opportunities.length > 0 ? 'existing' : 'suggested';
     }
+    renderModeSelector();
     renderSummary(opportunities, targetSuggestions);
     renderOpportunities(opportunities, targetSuggestions);
   }
@@ -1954,12 +2185,13 @@
 
     const allOpportunities = opportunities.concat(targetSuggestions);
     const totalSaved = allOpportunities.reduce((s, o) => s + o.heatsSaved, 0);
+    const mixedHeatsNeedingAssignment = findMixedHeatsNeedingPlaceAssignment();
     const seededEvents = allEvents.filter(e => recordsFor(e.id).length > 0).length;
     const swimmerEntries = allRecords.length;
     const heatCount = allHeats.length;
     const lanes = laneCount === null ? 'Not loaded' : laneCount;
 
-    el.innerHTML = `
+    el.innerHTML = editMeetMode ? `
       <div class="mm-summary-stat">
         <span class="mm-stat-value">${allOpportunities.length}</span>
         <span class="mm-stat-label">Possible Merges</span>
@@ -1980,7 +2212,87 @@
         <span class="mm-stat-value">${esc(lanes)}</span>
         <span class="mm-stat-label">Pool Lanes</span>
       </div>
+    ` : `
+      <div class="mm-summary-stat mm-stat-saved">
+        <span class="mm-stat-value">${mixedHeatsNeedingAssignment.length}</span>
+        <span class="mm-stat-label">Assignments</span>
+      </div>
+      <div class="mm-summary-stat">
+        <span class="mm-stat-value">${seededEvents}/${allEvents.length}</span>
+        <span class="mm-stat-label">Events With Entries</span>
+      </div>
+      <div class="mm-summary-stat">
+        <span class="mm-stat-value">${swimmerEntries}/${heatCount}</span>
+        <span class="mm-stat-label">Entries / Heats</span>
+      </div>
+      <div class="mm-summary-stat">
+        <span class="mm-stat-value">${esc(lanes)}</span>
+        <span class="mm-stat-label">Pool Lanes</span>
+      </div>
     `;
+  }
+
+  function renderModeControls() {
+    return `<div class="mm-mode-bar ${editMeetMode ? 'is-edit-mode' : ''}">
+      <div class="mm-mode-label">
+        <strong>${editMeetMode ? 'Pre-Meet Merge' : 'Locked Meet'}</strong>
+        <span>${editMeetMode ? 'Pick events to merge, merge entries, and organize heats before the meet starts.' : 'Merges are done. Use this mode to review mixed heats and assign gender heat places.'}</span>
+      </div>
+      <button class="mm-btn ${editMeetMode ? 'mm-btn-accent' : 'mm-btn-secondary'} mm-btn-sm mm-edit-mode-toggle" data-edit-mode="${editMeetMode ? 'off' : 'on'}">
+        <span class="mm-mode-button-icon" aria-hidden="true">${editMeetMode ? '&#128274;' : '&#128275;'}</span>${editMeetMode ? 'Lock Meet' : 'Pre-Meet Merge'}
+      </button>
+    </div>`;
+  }
+
+  function renderModeSelector() {
+    const slot = document.getElementById('mm-mode-slot');
+    if (!slot) return;
+
+    slot.innerHTML = renderModeControls();
+    slot.querySelector('.mm-edit-mode-toggle')?.addEventListener('click', event => {
+      const nextEditMeetMode = event.currentTarget.dataset.editMode === 'on';
+      if (nextEditMeetMode && anyMeetResultTimesAvailable()) {
+        const confirmed = window.confirm(
+          'This meet has result times, so it is treated as locked. Pre-Meet Merge mode can move swimmers and reorganize heats. Continue unlocking merge tools?'
+        );
+        if (!confirmed) return;
+        scoredMeetUnlockConfirmed = true;
+      }
+      editMeetMode = nextEditMeetMode;
+      if (!editMeetMode) scoredMeetUnlockConfirmed = false;
+      currentView = 'dashboard';
+      organizerEventId = null;
+      dashboardOpportunityTab = editMeetMode ? null : 'mixed-heats';
+      renderDashboard();
+    });
+  }
+
+  function renderReadOnlyDashboard(mixedHeatsNeedingAssignment, awardSummaries, mixedHeatCount) {
+    if (!['mixed-heats', 'awards'].includes(dashboardOpportunityTab)) dashboardOpportunityTab = 'mixed-heats';
+
+    const heatPlacesActive = dashboardOpportunityTab === 'mixed-heats';
+    const awardsActive = dashboardOpportunityTab === 'awards';
+    const heatPlaceContent = renderMixedHeatsPlaceAssignment(mixedHeatsNeedingAssignment);
+    const awardsContent = renderMixedGenderAwardSummaries(awardSummaries);
+    const emptyContent = heatPlacesActive
+      ? `<div class="mm-empty">
+        <div class="mm-empty-title">No mixed heats need heat place assignment</div>
+        <div class="mm-empty-copy">All mixed-gender heats already have separate place numbers for boys and girls.</div>
+      </div>`
+      : `<div class="mm-empty">
+        <div class="mm-empty-title">No printable mixed heats found</div>
+        <div class="mm-empty-copy">No populated mixed target currently has a heat with both boys and girls.</div>
+      </div>`;
+
+    return `<div class="mm-dashboard-tabs" role="tablist" aria-label="Locked meet tools">
+      <button class="mm-tab ${heatPlacesActive ? 'is-active' : ''}" role="tab" aria-selected="${heatPlacesActive ? 'true' : 'false'}" data-dashboard-tab="mixed-heats">
+        Heat Place Assignment <span>${mixedHeatsNeedingAssignment.length}</span>
+      </button>
+      <button class="mm-tab ${awardsActive ? 'is-active' : ''}" role="tab" aria-selected="${awardsActive ? 'true' : 'false'}" data-dashboard-tab="awards">
+        Printable Mixed Heats <span>${mixedHeatCount}</span>
+      </button>
+    </div>
+    ${heatPlacesActive ? (heatPlaceContent || emptyContent) : (awardsContent || emptyContent)}`;
   }
 
   function renderOpportunities(opportunities, targetSuggestions = filterSuggestedMergeTargetsByAgeGroupLimit(findSuggestedMergeTargets())) {
@@ -1988,8 +2300,15 @@
     if (!el) return;
     const awardSummaries = collectMixedGenderAwardSummaries();
     const mixedHeatCount = awardSummaries.reduce((count, summary) => count + summary.mixedHeats.length, 0);
-    const awardsAvailable = awardSummaries.length > 0;
-    if (!['existing', 'suggested', 'organize', 'awards'].includes(dashboardOpportunityTab) || (dashboardOpportunityTab === 'awards' && !awardsAvailable)) {
+    const mixedHeatsNeedingAssignment = findMixedHeatsNeedingPlaceAssignment();
+
+    if (!editMeetMode) {
+      el.innerHTML = renderReadOnlyDashboard(mixedHeatsNeedingAssignment, awardSummaries, mixedHeatCount);
+      wireDashboardButtons(el, opportunities, targetSuggestions);
+      return;
+    }
+
+    if (!['existing', 'suggested', 'organize'].includes(dashboardOpportunityTab)) {
       dashboardOpportunityTab = opportunities.length > 0 ? 'existing' : 'suggested';
     }
 
@@ -1998,14 +2317,11 @@
     const existingActive = activeTab === 'existing';
     const suggestedActive = activeTab === 'suggested';
     const organizeActive = activeTab === 'organize';
-    const awardsActive = activeTab === 'awards';
     const tabContent = existingActive
       ? renderExistingMergeOpportunities(opportunities)
       : suggestedActive
         ? renderSuggestedMergeTargets(targetSuggestions)
-        : organizeActive
-          ? renderSeededEvents(organizerEvents)
-          : renderMixedGenderAwardSummaries(awardSummaries);
+        : renderSeededEvents(organizerEvents);
     const emptyContent = existingActive
       ? `<div class="mm-empty">
           <div class="mm-empty-title">No existing-target merges found</div>
@@ -2022,10 +2338,7 @@
             <div class="mm-empty-title">No events to organize</div>
             <div class="mm-empty-copy">No seeded events or heats were returned for this session.</div>
           </div>`
-          : `<div class="mm-empty">
-            <div class="mm-empty-title">No mixed awards heats found</div>
-            <div class="mm-empty-copy">No populated mixed target currently has a heat with both boys and girls.</div>
-          </div>`;
+          : '';
 
     el.innerHTML = `
       <div class="mm-dashboard-tabs" role="tablist" aria-label="Merge opportunity type">
@@ -2038,9 +2351,6 @@
         <button class="mm-tab ${organizeActive ? 'is-active' : ''}" role="tab" aria-selected="${organizeActive ? 'true' : 'false'}" data-dashboard-tab="organize">
           Organize Heats <span>${organizerEvents.length}</span>
         </button>
-        ${awardsAvailable ? `<button class="mm-tab ${awardsActive ? 'is-active' : ''}" role="tab" aria-selected="${awardsActive ? 'true' : 'false'}" data-dashboard-tab="awards">
-          Mixed Awards <span>${mixedHeatCount}</span>
-        </button>` : ''}
       </div>
       ${tabContent || emptyContent}
     `;
@@ -2205,6 +2515,44 @@
     }
   }
 
+  function renderMixedHeatsPlaceAssignment(mixedHeats) {
+    if (mixedHeats.length === 0) return '';
+
+    return `<div class="mm-mixed-heats">
+      <div class="mm-context">
+        <div class="mm-context-title">Mixed heats needing heat place assignment</div>
+        <div class="mm-context-copy">These scored heats contain both boys and girls, and the current heat places do not restart at 1 separately for each gender.</div>
+      </div>
+      <div class="mm-mixed-heats-list">
+        ${mixedHeats.map(heat => {
+          const placeText = `Current boys: ${heat.malePlaces.slice(0, 4).join(', ')}${heat.malePlaces.length > 4 ? '...' : ''} | girls: ${heat.femalePlaces.slice(0, 4).join(', ')}${heat.femalePlaces.length > 4 ? '...' : ''}`;
+
+          return `<div class="mm-mixed-heat-item" data-heat-id="${esc(heat.heatId)}">
+            <div class="mm-mixed-heat-checkbox">
+              <input type="checkbox" id="heat-${esc(heat.heatId)}" value="${esc(heat.heatId)}">
+            </div>
+            <div class="mm-mixed-heat-content">
+              <div class="mm-mixed-heat-header">
+                <strong>${esc(heat.eventLabel)}</strong>
+                <span>Heat ${esc(heat.heatNumber)}</span>
+              </div>
+              <div class="mm-mixed-heat-details">
+                <span>${esc(heat.raceLabel)}</span>
+                <span>${heat.boyCount} boy${heat.boyCount === 1 ? '' : 's'}, ${heat.girlCount} girl${heat.girlCount === 1 ? '' : 's'}</span>
+                <span class="mm-place-info">${esc(placeText)}</span>
+              </div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="mm-mixed-heats-actions">
+        <button class="mm-btn mm-btn-secondary mm-btn-sm mm-select-all-mixed-heats">Select All</button>
+        <button class="mm-btn mm-btn-secondary mm-btn-sm mm-clear-selection-mixed-heats">Clear Selection</button>
+        <button class="mm-btn mm-btn-accent mm-btn-sm mm-assign-selected-places">Assign Places</button>
+      </div>
+    </div>`;
+  }
+
   function wireDashboardButtons(root, opportunities, targetSuggestions = []) {
     root.querySelectorAll('.mm-tab').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -2241,6 +2589,27 @@
     });
     root.querySelector('.mm-awards-copy')?.addEventListener('click', event => {
       copyMixedGenderAwardReport(root, event.currentTarget);
+    });
+
+    // Mixed Heats tab handlers
+    root.querySelector('.mm-select-all-mixed-heats')?.addEventListener('click', () => {
+      root.querySelectorAll('.mm-mixed-heat-item input[type="checkbox"]').forEach(cb => cb.checked = true);
+    });
+
+    root.querySelector('.mm-clear-selection-mixed-heats')?.addEventListener('click', () => {
+      root.querySelectorAll('.mm-mixed-heat-item input[type="checkbox"]').forEach(cb => cb.checked = false);
+    });
+
+    root.querySelector('.mm-assign-selected-places')?.addEventListener('click', () => {
+      const selectedHeatIds = [...root.querySelectorAll('.mm-mixed-heat-item input[type="checkbox"]:checked')]
+        .map(cb => cb.value);
+
+      if (selectedHeatIds.length === 0) {
+        alert('Please select at least one heat to assign places.');
+        return;
+      }
+
+      assignPlacesForSelectedHeats(selectedHeatIds);
     });
   }
 
@@ -2362,9 +2731,13 @@
   }
 
   function openOrganizer(eventId) {
+    if (!editMeetMode) {
+      alert('Switch to Pre-Meet Merge mode before organizing heats.');
+      renderDashboard();
+      return;
+    }
     currentView = 'organizer';
     organizerEventId = eventId;
-    renderSummary(findOpportunities(), filterSuggestedMergeTargetsByAgeGroupLimit(findSuggestedMergeTargets()));
     renderOrganizer(eventId);
   }
 
@@ -2404,8 +2777,14 @@
   }
 
   function renderOrganizer(eventId) {
+    if (!editMeetMode) {
+      renderDashboard();
+      return;
+    }
     currentView = 'organizer';
     organizerEventId = eventId;
+    renderModeSelector();
+    renderSummary(findOpportunities(), filterSuggestedMergeTargetsByAgeGroupLimit(findSuggestedMergeTargets()));
 
     const el = document.getElementById('mm-body');
     if (!el) return;
@@ -3023,6 +3402,11 @@
   }
 
   async function organizeByTime(eventId, button) {
+    if (!editMeetMode) {
+      alert('Switch to Pre-Meet Merge mode before organizing heats.');
+      renderDashboard();
+      return;
+    }
     const chunks = planTimeHeatChunks(recordsFor(eventId));
     const heats = heatsFor(eventId);
     const targetHeats = heats.slice(0, chunks.length);
@@ -3051,6 +3435,11 @@
   }
 
   async function organizeByGender(eventId, button, mode = 'minimize') {
+    if (!editMeetMode) {
+      alert('Switch to Pre-Meet Merge mode before organizing heats.');
+      renderDashboard();
+      return;
+    }
     const heats = heatsFor(eventId);
     const records = recordsFor(eventId);
     const laneTotal = requireLaneCount();
@@ -3075,6 +3464,11 @@
   }
 
   async function organizeByAgeGroup(eventId, button) {
+    if (!editMeetMode) {
+      alert('Switch to Pre-Meet Merge mode before organizing heats.');
+      renderDashboard();
+      return;
+    }
     const heats = heatsFor(eventId);
     const records = recordsFor(eventId);
     const laneTotal = requireLaneCount();
@@ -3102,6 +3496,81 @@
     });
 
     await applyOrganizerAssignments(eventId, assignments, button, 'Grouping...');
+  }
+
+  async function assignPlacesForSelectedHeats(heatIds) {
+    if (isOperationInFlight()) return;
+    if (editMeetMode) {
+      alert('Switch to Locked Meet before assigning heat places.');
+      renderDashboard();
+      return;
+    }
+
+    const a = await getAPI();
+    if (!a) {
+      alert('Not connected to API');
+      return;
+    }
+
+    const finish = beginOperation('Assigning heat places by gender...');
+
+    try {
+      const selectedHeatIds = new Set((heatIds || []).filter(Boolean));
+      const assignmentRecords = [];
+
+      allEvents.forEach(evt => {
+        const heats = heatsFor(evt.id);
+        heats.forEach(heat => {
+          if (!selectedHeatIds.has(heat.id)) return;
+
+          const heatRecords = recordsFor(evt.id).filter(r => r.relationships?.heat?.data?.id === heat.id);
+          const summary = mixedHeatPlaceAssignmentSummary(evt, heat);
+          if (!summary?.needsAssignment) return;
+
+          placeUpdatesForMixedHeat(heatRecords).forEach(update => {
+            if (recordHeatPlace(update.record) !== update.judgedHeatPlace) {
+              assignmentRecords.push(update);
+            }
+          });
+        });
+      });
+
+      if (assignmentRecords.length === 0) {
+        alert('No eligible scored mixed-gender heats were found in the selected heats.');
+        return;
+      }
+
+      const placeUpdates = assignmentRecords.map(({ record, judgedHeatPlace }) => ({
+        recordId: record.id,
+        judgedHeatPlace,
+      }));
+
+      setBusyProgress(0, placeUpdates.length, `Assigning ${placeUpdates.length} heat place(s)...`);
+
+      // Call the API to assign all heat places.
+      const results = await a.updateJudgedHeatPlaces(placeUpdates, {
+        onProgress({ completed, total }) {
+          setBusyProgress(completed, total, `Assigned ${completed} of ${total} heat place(s)...`);
+        },
+      });
+
+      clearBusyProgress();
+
+      const failures = results.filter(r => !r.success);
+      if (failures.length > 0) {
+        console.error('[Merge Helper] some place updates failed:', failures);
+        alert(`${failures.length} of ${placeUpdates.length} place updates failed. Check the console for details.`);
+      }
+
+      // Refresh the data to show updated places
+      setBusyMessage('Refreshing meet data...');
+      await loadData();
+    } catch (err) {
+      console.error('[Merge Helper] assign places for selected heats failed:', err);
+      alert('Failed to assign places: ' + err.message);
+    } finally {
+      finish();
+    }
   }
 
   async function applyOrganizerAssignments(eventId, assignments, button, savingLabel) {
@@ -3333,6 +3802,7 @@
   }
 
   function togglePreview(oppId) {
+    if (!editMeetMode) return;
     const opp = findOpportunities().find(o => o.id === oppId);
     if (!opp) return;
 
@@ -3446,6 +3916,11 @@
 
   async function executeMerge(oppId) {
     if (isOperationInFlight()) return;
+    if (!editMeetMode) {
+      alert('Switch to Pre-Meet Merge mode before merging events.');
+      renderDashboard();
+      return;
+    }
     const opp = findOpportunities().find(o => o.id === oppId);
     if (!opp) return;
 
@@ -3608,13 +4083,54 @@
       await waitForPageReady();
       await sleep(750);
       buildPanel();
-      panelVisible = true;
-      mergePanel.style.display = 'flex';
+      setPanelVisibility(true);
+      editMeetMode = !!reloadRestoreState.editMeetMode;
       if (reloadRestoreState.view === 'organizer' && reloadRestoreState.organizerEventId) {
         currentView = 'organizer';
         organizerEventId = reloadRestoreState.organizerEventId;
       }
       withBusy('Loading meet data...', () => loadData({ apiRetries: 30, apiDelayMs: 500 })).catch(() => {});
     })();
+  }
+
+  // ---- Meet Maestro navigation button ----
+
+  function findMeetMaestroNavActions() {
+    const settingsButton = document.querySelector('nav [data-test-button="nav-settings"]');
+    if (settingsButton?.parentElement) return settingsButton.parentElement;
+
+    const supportLink = document.querySelector('nav a[href*="/help/support"]');
+    return supportLink?.parentElement || null;
+  }
+
+  function ensureMeetMaestroNavButton() {
+    if (document.getElementById('mm-nav-button')) return;
+    const actions = findMeetMaestroNavActions();
+    if (!actions) return;
+
+    const button = document.createElement('button');
+    button.id = 'mm-nav-button';
+    button.className = 'mm-nav-button';
+    button.type = 'button';
+    button.title = 'Open Maestro Helper';
+    button.textContent = 'Maestro Helper';
+    button.addEventListener('click', () => togglePanel());
+
+    const settingsButton = actions.querySelector('[data-test-button="nav-settings"]');
+    actions.insertBefore(button, settingsButton || actions.firstChild);
+  }
+
+  function initializeMeetMaestroNavButton() {
+    ensureMeetMaestroNavButton();
+    const observer = new MutationObserver(() => ensureMeetMaestroNavButton());
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  if (!window.__mmMergeHelperTestMode) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initializeMeetMaestroNavButton);
+    } else {
+      initializeMeetMaestroNavButton();
+    }
   }
 })();

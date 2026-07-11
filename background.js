@@ -3,7 +3,7 @@
 
 let cachedAuthToken = null;
 
-async function ensureContentScriptLoaded(tabId) {
+async function ensureContentScriptLoaded(tabId, url) {
   try {
     await chrome.tabs.sendMessage(tabId, { type: 'GET_STATUS' });
     return;
@@ -13,10 +13,19 @@ async function ensureContentScriptLoaded(tabId) {
     target: { tabId },
     files: ['content.css'],
   });
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ['lib/api.js', 'content.js'],
-  });
+
+  // Determine which content script to load based on URL
+  if (url?.includes('maestro.swimtopia.com')) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['lib/api.js', 'content.js'],
+    });
+  } else if (url?.includes('/manage/reports/')) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['swimtopia-content.js'],
+    });
+  }
 }
 
 // Intercept Authorization header from any request to the SwimTopia API.
@@ -59,10 +68,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab?.id || !tab.url?.includes('maestro.swimtopia.com')) return;
+  if (!tab?.id) return;
+
+  const isMaestro = tab.url?.includes('maestro.swimtopia.com');
+  const isSwimtopiaReport = tab.url?.includes('.swimtopia.com/manage/reports/');
+
+  if (!isMaestro && !isSwimtopiaReport) return;
+
   try {
-    await ensureContentScriptLoaded(tab.id);
-    await chrome.tabs.sendMessage(tab.id, { type: 'OPEN_MERGE_PANEL' });
+    await ensureContentScriptLoaded(tab.id, tab.url);
+    const messageType = isMaestro ? 'OPEN_MERGE_PANEL' : 'RUN_SWIMTOPIA_ACTION';
+    await chrome.tabs.sendMessage(tab.id, { type: messageType });
   } catch (err) {
     console.error('[Merge Helper] failed to open panel from action click:', err);
   }
