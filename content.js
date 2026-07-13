@@ -1602,6 +1602,24 @@
     return compareEventOrder(a, b);
   }
 
+  function compareByEventNumber(a, b) {
+    const aNum = eventNumber(a);
+    const bNum = eventNumber(b);
+    const aMatch = aNum.match(/^(\d+)([A-Za-z]*)$/);
+    const bMatch = bNum.match(/^(\d+)([A-Za-z]*)$/);
+    const aHasNum = aMatch && aMatch[1];
+    const bHasNum = bMatch && bMatch[1];
+
+    if (aHasNum && bHasNum) {
+      const numDiff = Number(aMatch[1]) - Number(bMatch[1]);
+      if (numDiff !== 0) return numDiff;
+      return aMatch[2].localeCompare(bMatch[2]);
+    }
+    if (aHasNum && !bHasNum) return -1;
+    if (!aHasNum && bHasNum) return 1;
+    return aNum.localeCompare(bNum);
+  }
+
   function isSourceCompatibleWithTarget(source, target) {
     if (source.id === target.id || isMergeTarget(source)) return false;
     if (!hasRaceMetadata(source) || !hasRaceMetadata(target) || !hasAgeMetadata(source) || !hasAgeMetadata(target)) return false;
@@ -1960,11 +1978,12 @@
 
     const filteredSuggestions = filterBroaderNonImprovingTargets(filterStrictlyDiminishing(Array.from(suggestions.values())));
     filteredSuggestions.sort((a, b) => {
-      if (b.heatsSaved !== a.heatsSaved) return b.heatsSaved - a.heatsSaved;
-      if (b.sourceEvents.length !== a.sourceEvents.length) return b.sourceEvents.length - a.sourceEvents.length;
+      const eventNumDiff = compareByEventNumber(a.sourceEvents[0], b.sourceEvents[0]);
+      if (eventNumDiff !== 0) return eventNumDiff;
       const raceDiff = (a.raceLabel || '').localeCompare(b.raceLabel || '');
       if (raceDiff !== 0) return raceDiff;
-      return compareAgeThenEventOrder(a.sourceEvents[0], b.sourceEvents[0]);
+      if (b.heatsSaved !== a.heatsSaved) return b.heatsSaved - a.heatsSaved;
+      return b.sourceEvents.length - a.sourceEvents.length;
     });
     return filteredSuggestions;
   }
@@ -2814,17 +2833,27 @@
       return;
     }
 
-    const rows = heats.map(heat => {
+    const rows = heats.map((heat, heatIndex) => {
       const heatRecords = records.filter(r => r.relationships?.heat?.data?.id === heat.id);
       let laneHtml = '';
       for (let lane = 1; lane <= laneTotal; lane++) {
         const record = heatRecords.find(r => r.attributes?.laneNumber === lane);
         laneHtml += renderOrganizerLane(heat, lane, record, eventId, ranks);
       }
+      const isFirstHeat = heatIndex === 0;
+      const isLastHeat = heatIndex === heats.length - 1;
       return `<div class="mm-heat-row">
         <div class="mm-heat-label">
-          <strong>Heat ${esc(heat.attributes?.number || '?')}</strong>
-          <span>${heatRecords.length}/${laneTotal} entries</span>
+          <div class="mm-heat-label-summary">
+            <strong>Heat ${esc(heat.attributes?.number || '?')}</strong>
+            <span>${heatRecords.length}/${laneTotal}</span>
+          </div>
+          <div class="mm-heat-controls">
+            <button class="mm-btn mm-btn-secondary mm-sort-heat-by-time" data-heat-id="${esc(heat.id)}" data-event-id="${esc(eventId)}" title="Sort lanes by time">↔T</button>
+            <button class="mm-btn mm-btn-secondary mm-sort-heat-by-gender" data-heat-id="${esc(heat.id)}" data-event-id="${esc(eventId)}" title="Sort lanes by gender">↔G</button>
+            <button class="mm-btn mm-btn-secondary mm-move-heat-up" data-heat-id="${esc(heat.id)}" data-event-id="${esc(eventId)}" ${isFirstHeat ? 'disabled' : ''} title="Move heat up" aria-label="Move heat up">↑</button>
+            <button class="mm-btn mm-btn-secondary mm-move-heat-down" data-heat-id="${esc(heat.id)}" data-event-id="${esc(eventId)}" ${isLastHeat ? 'disabled' : ''} title="Move heat down" aria-label="Move heat down">↓</button>
+          </div>
         </div>
         <div class="mm-heat-lanes" style="grid-template-columns: repeat(${laneTotal}, minmax(54px, 1fr));">
           ${laneHtml}
@@ -2889,6 +2918,30 @@
     el.querySelector('.mm-group-gender-minimized')?.addEventListener('click', event => organizeByGender(eventId, event.currentTarget, 'minimize'));
     el.querySelector('.mm-group-gender-balanced')?.addEventListener('click', event => organizeByGender(eventId, event.currentTarget, 'balanced'));
     el.querySelector('.mm-group-age')?.addEventListener('click', event => organizeByAgeGroup(eventId, event.currentTarget));
+    el.querySelectorAll('.mm-sort-heat-by-time').forEach(button => {
+      button.addEventListener('click', event => {
+        const heatId = event.target.dataset.heatId;
+        sortHeatByTime(heatId, eventId, event.currentTarget);
+      });
+    });
+    el.querySelectorAll('.mm-sort-heat-by-gender').forEach(button => {
+      button.addEventListener('click', event => {
+        const heatId = event.target.dataset.heatId;
+        sortHeatByGender(heatId, eventId, event.currentTarget);
+      });
+    });
+    el.querySelectorAll('.mm-move-heat-up').forEach(button => {
+      button.addEventListener('click', event => {
+        const heatId = event.target.dataset.heatId;
+        moveHeatUp(heatId, eventId, event.currentTarget);
+      });
+    });
+    el.querySelectorAll('.mm-move-heat-down').forEach(button => {
+      button.addEventListener('click', event => {
+        const heatId = event.target.dataset.heatId;
+        moveHeatDown(heatId, eventId, event.currentTarget);
+      });
+    });
     el.querySelectorAll('.mm-segmented-btn').forEach(button => {
       button.addEventListener('click', () => {
         if (button.dataset.labelMode) organizerLabelMode = button.dataset.labelMode;
@@ -3496,6 +3549,128 @@
     });
 
     await applyOrganizerAssignments(eventId, assignments, button, 'Grouping...');
+  }
+
+  async function sortHeatByTime(heatId, eventId, button) {
+    if (!editMeetMode) {
+      alert('Switch to Pre-Meet Merge mode before sorting heats.');
+      renderDashboard();
+      return;
+    }
+
+    const heat = allHeats.find(h => h.id === heatId);
+    if (!heat) {
+      alert('Heat not found. Refresh meet data and try again.');
+      return;
+    }
+
+    const heatRecords = recordsFor(eventId).filter(r => r.relationships?.heat?.data?.id === heatId);
+    if (heatRecords.length === 0) {
+      alert('No entries found in this heat.');
+      return;
+    }
+
+    const lanes = laneSeedOrder();
+    const heatNumber = heatNumberFor(heat, 'heat');
+    const assignments = [];
+
+    heatRecords.slice().sort(compareFastestFirst).forEach((record, laneIndex) => {
+      if (laneIndex < lanes.length) {
+        assignments.push(buildAssignment(record, {
+          heatId,
+          heatNumber,
+          laneNumber: lanes[laneIndex],
+        }));
+      }
+    });
+
+    await applyOrganizerAssignments(eventId, assignments, button, 'Sorting heat...');
+  }
+
+  async function sortHeatByGender(heatId, eventId, button) {
+    if (!editMeetMode) {
+      alert('Switch to Pre-Meet Merge mode before sorting heats.');
+      renderDashboard();
+      return;
+    }
+
+    const heat = allHeats.find(h => h.id === heatId);
+    if (!heat) {
+      alert('Heat not found. Refresh meet data and try again.');
+      return;
+    }
+
+    const heatRecords = recordsFor(eventId).filter(r => r.relationships?.heat?.data?.id === heatId);
+    if (heatRecords.length === 0) {
+      alert('No entries found in this heat.');
+      return;
+    }
+
+    const heatNumber = heatNumberFor(heat, 'heat');
+    const assignments = genderChunkLaneAssignments(heatRecords).map(({ record, laneNumber }) =>
+      buildAssignment(record, { heatId, heatNumber, laneNumber })
+    );
+
+    await applyOrganizerAssignments(eventId, assignments, button, 'Sorting heat...');
+  }
+
+  async function swapHeats(heatId, otherHeatId, eventId, button) {
+    if (!editMeetMode) {
+      alert('Switch to Pre-Meet Merge mode before swapping heats.');
+      renderDashboard();
+      return;
+    }
+
+    const heat = allHeats.find(h => h.id === heatId);
+    const otherHeat = allHeats.find(h => h.id === otherHeatId);
+    if (!heat || !otherHeat) {
+      alert('One or more heats not found. Refresh meet data and try again.');
+      return;
+    }
+
+    const heatRecords = recordsFor(eventId).filter(r => r.relationships?.heat?.data?.id === heatId);
+    const otherHeatRecords = recordsFor(eventId).filter(r => r.relationships?.heat?.data?.id === otherHeatId);
+
+    const heatNumber = heatNumberFor(heat, 'heat');
+    const otherHeatNumber = heatNumberFor(otherHeat, 'other heat');
+
+    const assignments = [];
+
+    heatRecords.forEach(record => {
+      const currentLane = Number(record.attributes?.laneNumber);
+      assignments.push(buildAssignment(record, {
+        heatId: otherHeatId,
+        heatNumber: otherHeatNumber,
+        laneNumber: currentLane,
+      }));
+    });
+
+    otherHeatRecords.forEach(record => {
+      const currentLane = Number(record.attributes?.laneNumber);
+      assignments.push(buildAssignment(record, {
+        heatId,
+        heatNumber,
+        laneNumber: currentLane,
+      }));
+    });
+
+    await applyOrganizerAssignments(eventId, assignments, button, 'Swapping heats...');
+  }
+
+  async function moveHeatUp(heatId, eventId, button) {
+    const heats = heatsFor(eventId);
+    const heatIndex = heats.findIndex(h => h.id === heatId);
+    if (heatIndex <= 0) return;
+    const otherHeat = heats[heatIndex - 1];
+    await swapHeats(heatId, otherHeat.id, eventId, button);
+  }
+
+  async function moveHeatDown(heatId, eventId, button) {
+    const heats = heatsFor(eventId);
+    const heatIndex = heats.findIndex(h => h.id === heatId);
+    if (heatIndex < 0 || heatIndex >= heats.length - 1) return;
+    const otherHeat = heats[heatIndex + 1];
+    await swapHeats(heatId, otherHeat.id, eventId, button);
   }
 
   async function assignPlacesForSelectedHeats(heatIds) {
