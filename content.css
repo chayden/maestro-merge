@@ -1225,7 +1225,7 @@ body.mm-merge-helper-panel-open > *:not(#mm-panel) {
 
 .mm-heat-row {
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
+  grid-template-columns: 96px minmax(0, 1fr);
   gap: 10px;
   align-items: stretch;
 }
@@ -1234,17 +1234,36 @@ body.mm-merge-helper-panel-open > *:not(#mm-panel) {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 3px;
+  gap: 4px;
   color: #d7e1ee;
+}
+
+.mm-heat-label-summary,
+.mm-heat-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px;
 }
 
 .mm-heat-label strong {
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .mm-heat-label span {
   color: #8190a3;
   font-size: 10px;
+}
+
+.mm-heat-controls .mm-btn {
+  min-width: 0;
+  padding: 3px 4px;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mm-heat-lanes {
